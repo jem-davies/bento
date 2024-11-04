@@ -13,15 +13,21 @@ jobs:
     - name: Check Out Repo
       uses: actions/checkout@v4
 
-    - name: Free up some disk space on ubuntu
-      if: ${{ runner.os == 'Linux' }}
-      run: |
-        # Workaround to provide additional free space for testing.
-        #   https://github.com/actions/virtual-environments/issues/2840
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /opt/ghc
-        sudo rm -rf "/usr/local/share/boost"
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        # this might remove tools that are actually needed,
+        # if set to "true" but frees about 6 GB
+        tool-cache: false
+        
+        # all of these default to true, but feel free to set to
+        # "false" if necessary for your workflow
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
     - name: Install Go
       uses: actions/setup-go@v5
@@ -50,15 +56,21 @@ jobs:
     - name: Check Out Repo
       uses: actions/checkout@v4
 
-    - name: Free up some disk space on ubuntu
-      if: ${{ runner.os == 'Linux' }}
-      run: |
-        # Workaround to provide additional free space for testing.
-        #   https://github.com/actions/virtual-environments/issues/2840
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /opt/ghc
-        sudo rm -rf "/usr/local/share/boost"
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        # this might remove tools that are actually needed,
+        # if set to "true" but frees about 6 GB
+        tool-cache: false
+        
+        # all of these default to true, but feel free to set to
+        # "false" if necessary for your workflow
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
     - name: Log in to registry
       run: echo "${{ secrets.GH_ACCESS_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
