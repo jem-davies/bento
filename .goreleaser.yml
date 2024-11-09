@@ -14,8 +14,8 @@ builds:
       - CGO_ENABLED=0
     ldflags: >
       -s -w
-      -X github.com/warpstreamlabs/bento/internal/cli.Version=v3.1.2
-      -X github.com/warpstreamlabs/bento/internal/cli.DateBuilt=2024-11-06T00:00:00Z
+      -X main.Version={{.Version}}
+      -X main.DateBuilt={{.Date}}
 dist: target/dist
 release:
   github:
