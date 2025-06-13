@@ -10,6 +10,7 @@ import (
 
 	"github.com/warpstreamlabs/bento/internal/impl/kafka"
 
+	_ "github.com/warpstreamlabs/bento/internal/impl/kafka/aws"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 	"github.com/warpstreamlabs/bento/public/service"
 )

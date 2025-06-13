@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 
+	"github.com/IBM/sarama"
 	"github.com/warpstreamlabs/bento/internal/impl/kafka"
 	"github.com/warpstreamlabs/bento/public/service"
 
@@ -31,5 +32,21 @@ func init() {
 				SessionToken: val.SessionToken,
 			}, nil
 		}), nil
+	}
+
+	kafka.AWSSASLFromConfigFnSarama = func(awsConf *service.ParsedConfig) (sarama.AccessTokenProvider, sarama.SASLMechanism, error) {
+
+		session, err := sess.GetSession(context.Background(), awsConf)
+		if err != nil {
+			return nil, "", err
+		}
+
+		tp := &kafka.MskAccessTokenProvider{
+			Region:      session.Region,
+			Credentials: session.Credentials,
+			Signer:      kafka.AwsMskIamSaslSigner,
+		}
+		m := sarama.SASLMechanism(sarama.SASLTypeOAuth)
+		return tp, m, err
 	}
 }

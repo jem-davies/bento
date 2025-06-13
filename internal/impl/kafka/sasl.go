@@ -7,7 +7,6 @@ import (
 
 	"github.com/IBM/sarama"
 
-	sess "github.com/warpstreamlabs/bento/internal/impl/aws"
 	"github.com/warpstreamlabs/bento/internal/impl/aws/config"
 	"github.com/warpstreamlabs/bento/public/service"
 
@@ -23,8 +22,14 @@ func notImportedAWSFn(c *service.ParsedConfig) (sasl.Mechanism, error) {
 	return nil, errors.New("unable to configure AWS SASL as this binary does not import components/aws")
 }
 
+func notImportedAWSFnSarama(awsConf *service.ParsedConfig) (sarama.AccessTokenProvider, sarama.SASLMechanism, error) {
+	return nil, "", errors.New("unable to configure AWS SASL as this binary does not import components/aws")
+}
+
 // AWSSASLFromConfigFn is populated with the child `aws` package when imported.
 var AWSSASLFromConfigFn = notImportedAWSFn
+
+var AWSSASLFromConfigFnSarama = notImportedAWSFnSarama
 
 // AwsMskIamSaslSigner defaults to using github.com/aws/aws-msk-iam-sasl-signer-go/signer
 var AwsMskIamSaslSigner AuthTokenGenerator = &awsMskSaslSigner{}
@@ -319,16 +324,12 @@ func ApplySaramaSASLFromParsed(pConf *service.ParsedConfig, mgr *service.Resourc
 		conf.Net.SASL.Password = password
 		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
 	case "AWS_MSK_IAM":
-		session, err := sess.GetSession(context.Background(), awsConf)
+		tp, m, err := AWSSASLFromConfigFnSarama(awsConf)
 		if err != nil {
-			return nil
+			return err
 		}
-		conf.Net.SASL.TokenProvider = &mskAccessTokenProvider{
-			region:      session.Region,
-			credentials: session.Credentials,
-			signer:      AwsMskIamSaslSigner,
-		}
-		conf.Net.SASL.Mechanism = sarama.SASLTypeOAuth
+		conf.Net.SASL.TokenProvider = tp
+		conf.Net.SASL.Mechanism = m
 	case "", "none":
 		return nil
 	default:
@@ -389,14 +390,14 @@ func (s *staticAccessTokenProvider) Token() (*sarama.AccessToken, error) {
 	return &sarama.AccessToken{Token: s.token}, nil
 }
 
-type mskAccessTokenProvider struct {
-	region      string
-	credentials aws.CredentialsProvider
-	signer      AuthTokenGenerator
+type MskAccessTokenProvider struct {
+	Region      string
+	Credentials aws.CredentialsProvider
+	Signer      AuthTokenGenerator
 }
 
-func (m *mskAccessTokenProvider) Token() (*sarama.AccessToken, error) {
-	token, _, err := m.signer.GenerateAuthTokenFromCredentialsProvider(context.Background(), m.region, m.credentials)
+func (m *MskAccessTokenProvider) Token() (*sarama.AccessToken, error) {
+	token, _, err := m.Signer.GenerateAuthTokenFromCredentialsProvider(context.Background(), m.Region, m.Credentials)
 	return &sarama.AccessToken{Token: token}, err
 }
 
