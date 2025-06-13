@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/IBM/sarama"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/require"
 
 	"github.com/warpstreamlabs/bento/internal/impl/kafka"
@@ -139,20 +140,8 @@ sasl:
 
 type mockSigner struct{}
 
-func (s *mockSigner) GenerateAuthToken(ctx context.Context, region string) (string, int64, error) {
-	return "usedGenerateAuthToken", 0, nil
-}
-
-func (s *mockSigner) GenerateAuthTokenFromProfile(ctx context.Context, region, profile string) (string, int64, error) {
-	return "usedGenerateAuthTokenFromProfile", 0, nil
-}
-
-func (s *mockSigner) GenerateAuthTokenFromRole(ctx context.Context, region, roleArn, sessionName string) (string, int64, error) {
-	return "usedGenerateAuthTokenFromRole", 0, nil
-}
-
-func (s *mockSigner) GenerateAuthTokenFromRoleWithExternalID(ctx context.Context, region, roleArn, sessionName, externalID string) (string, int64, error) {
-	return "usedGenerateAuthTokenFromRoleWithExternalID", 0, nil
+func (s *mockSigner) GenerateAuthTokenFromCredentialsProvider(ctx context.Context, region string, credentialsProvider aws.CredentialsProvider) (string, int64, error) {
+	return "mockToken", 0, nil
 }
 
 func TestApplyAwsMskIamMechanism(t *testing.T) {
@@ -183,113 +172,7 @@ sasl:
 		t.Errorf("Failed to get token")
 	}
 
-	expected := "usedGenerateAuthToken"
-	if act := token.Token; act != expected {
-		t.Errorf("Wrong SASL token: %v != %v", act, expected)
-	}
-}
-
-func TestApplyAwsMskIamMechanismWithRole(t *testing.T) {
-	kafka.AwsMskIamSaslSigner = &mockSigner{}
-
-	saslConf := service.NewConfigSpec().Field(kafka.SaramaSASLField())
-	pConf, err := saslConf.ParseYAML(`
-sasl:
-  mechanism: AWS_MSK_IAM
-  aws:
-    credentials:
-      role: fooarn
-`, nil)
-	require.NoError(t, err)
-
-	conf := &sarama.Config{}
-	require.NoError(t, kafka.ApplySaramaSASLFromParsed(pConf, service.MockResources(), conf))
-
-	if !conf.Net.SASL.Enable {
-		t.Errorf("SASL not enabled")
-	}
-
-	if conf.Net.SASL.Mechanism != sarama.SASLTypeOAuth {
-		t.Errorf("Wrong SASL mechanism: %v != %v", conf.Net.SASL.Mechanism, sarama.SASLTypeOAuth)
-	}
-
-	token, err := conf.Net.SASL.TokenProvider.Token()
-	if err != nil {
-		t.Errorf("Failed to get token")
-	}
-
-	expected := "usedGenerateAuthTokenFromRole"
-	if act := token.Token; act != expected {
-		t.Errorf("Wrong SASL token: %v != %v", act, expected)
-	}
-}
-
-func TestApplyAwsMskIamMechanismWithProfile(t *testing.T) {
-	kafka.AwsMskIamSaslSigner = &mockSigner{}
-
-	saslConf := service.NewConfigSpec().Field(kafka.SaramaSASLField())
-	pConf, err := saslConf.ParseYAML(`
-sasl:
-  mechanism: AWS_MSK_IAM
-  aws:
-    credentials:
-      profile: bar
-`, nil)
-	require.NoError(t, err)
-
-	conf := &sarama.Config{}
-	require.NoError(t, kafka.ApplySaramaSASLFromParsed(pConf, service.MockResources(), conf))
-
-	if !conf.Net.SASL.Enable {
-		t.Errorf("SASL not enabled")
-	}
-
-	if conf.Net.SASL.Mechanism != sarama.SASLTypeOAuth {
-		t.Errorf("Wrong SASL mechanism: %v != %v", conf.Net.SASL.Mechanism, sarama.SASLTypeOAuth)
-	}
-
-	token, err := conf.Net.SASL.TokenProvider.Token()
-	if err != nil {
-		t.Errorf("Failed to get token")
-	}
-
-	expected := "usedGenerateAuthTokenFromProfile"
-	if act := token.Token; act != expected {
-		t.Errorf("Wrong SASL token: %v != %v", act, expected)
-	}
-}
-
-func TestApplyAwsMskIamMechanismWithRoleExternalId(t *testing.T) {
-	kafka.AwsMskIamSaslSigner = &mockSigner{}
-
-	saslConf := service.NewConfigSpec().Field(kafka.SaramaSASLField())
-	pConf, err := saslConf.ParseYAML(`
-sasl:
-  mechanism: AWS_MSK_IAM
-  aws:
-    credentials:
-      role: fooarn
-      role_external_id: bar_id
-`, nil)
-	require.NoError(t, err)
-
-	conf := &sarama.Config{}
-	require.NoError(t, kafka.ApplySaramaSASLFromParsed(pConf, service.MockResources(), conf))
-
-	if !conf.Net.SASL.Enable {
-		t.Errorf("SASL not enabled")
-	}
-
-	if conf.Net.SASL.Mechanism != sarama.SASLTypeOAuth {
-		t.Errorf("Wrong SASL mechanism: %v != %v", conf.Net.SASL.Mechanism, sarama.SASLTypeOAuth)
-	}
-
-	token, err := conf.Net.SASL.TokenProvider.Token()
-	if err != nil {
-		t.Errorf("Failed to get token")
-	}
-
-	expected := "usedGenerateAuthTokenFromRoleWithExternalID"
+	expected := "mockToken"
 	if act := token.Token; act != expected {
 		t.Errorf("Wrong SASL token: %v != %v", act, expected)
 	}

@@ -7,10 +7,12 @@ import (
 
 	"github.com/IBM/sarama"
 
+	sess "github.com/warpstreamlabs/bento/internal/impl/aws"
 	"github.com/warpstreamlabs/bento/internal/impl/aws/config"
 	"github.com/warpstreamlabs/bento/public/service"
 
 	"github.com/aws/aws-msk-iam-sasl-signer-go/signer"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/twmb/franz-go/pkg/sasl"
 	"github.com/twmb/franz-go/pkg/sasl/oauth"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
@@ -236,24 +238,7 @@ func SaramaSASLField() *service.ConfigField {
 		service.NewStringField(saramaFieldSASLTokenKey).
 			Description("Required when using a `token_cache`, the key to query the cache with for tokens.").
 			Default(""),
-		service.NewObjectField(saramaFieldSASLAws, []*service.ConfigField{
-			service.NewStringField("region").
-				Description("The AWS region to target.").
-				Default("").
-				Advanced(),
-			service.NewObjectField("credentials",
-				service.NewStringField("profile").
-					Description("A profile from `~/.aws/credentials` to use.").
-					Default("").Advanced(),
-				service.NewStringField("role").
-					Description("A role ARN to assume.").
-					Default("").Advanced(),
-				service.NewStringField("role_external_id").
-					Description("An external ID to provide when assuming a role.").
-					Default("").Advanced()).
-				Advanced().
-				Description("Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws)."),
-		}...).
+		service.NewObjectField(saramaFieldSASLAws, config.SessionFields()...).
 			Description("Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.").
 			Optional(),
 	).
@@ -299,28 +284,6 @@ func ApplySaramaSASLFromParsed(pConf *service.ParsedConfig, mgr *service.Resourc
 
 	awsConf := pConf.Namespace(saramaFieldSASLAws)
 
-	region, err := awsConf.FieldString("region")
-	if err != nil {
-		return nil
-	}
-
-	credentialsConf := awsConf.Namespace("credentials")
-
-	profile, err := credentialsConf.FieldString("profile")
-	if err != nil {
-		return nil
-	}
-
-	role, err := credentialsConf.FieldString("role")
-	if err != nil {
-		return nil
-	}
-
-	roleExternalID, err := credentialsConf.FieldString("role_external_id")
-	if err != nil {
-		return nil
-	}
-
 	switch mechanism {
 	case sarama.SASLTypeOAuth:
 		var tp sarama.AccessTokenProvider
@@ -356,12 +319,14 @@ func ApplySaramaSASLFromParsed(pConf *service.ParsedConfig, mgr *service.Resourc
 		conf.Net.SASL.Password = password
 		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
 	case "AWS_MSK_IAM":
+		session, err := sess.GetSession(context.Background(), awsConf)
+		if err != nil {
+			return nil
+		}
 		conf.Net.SASL.TokenProvider = &mskAccessTokenProvider{
-			region:         region,
-			profile:        profile,
-			role:           role,
-			roleExternalID: roleExternalID,
-			signer:         AwsMskIamSaslSigner,
+			region:      session.Region,
+			credentials: session.Credentials,
+			signer:      AwsMskIamSaslSigner,
 		}
 		conf.Net.SASL.Mechanism = sarama.SASLTypeOAuth
 	case "", "none":
@@ -425,55 +390,26 @@ func (s *staticAccessTokenProvider) Token() (*sarama.AccessToken, error) {
 }
 
 type mskAccessTokenProvider struct {
-	profile        string
-	region         string
-	role           string
-	roleExternalID string
-	signer         AuthTokenGenerator
+	region      string
+	credentials aws.CredentialsProvider
+	signer      AuthTokenGenerator
 }
 
 func (m *mskAccessTokenProvider) Token() (*sarama.AccessToken, error) {
-	if m.profile != "" {
-		token, _, err := m.signer.GenerateAuthTokenFromProfile(context.Background(), m.region, m.profile)
-		return &sarama.AccessToken{Token: token}, err
-	}
-	if m.role != "" && m.roleExternalID != "" {
-		token, _, err := m.signer.GenerateAuthTokenFromRoleWithExternalID(context.Background(), m.region, m.role, signer.DefaultSessionName, m.roleExternalID)
-		return &sarama.AccessToken{Token: token}, err
-	}
-	if m.role != "" {
-		token, _, err := m.signer.GenerateAuthTokenFromRole(context.Background(), m.region, m.role, signer.DefaultSessionName)
-		return &sarama.AccessToken{Token: token}, err
-	}
-	token, _, err := m.signer.GenerateAuthToken(context.Background(), m.region)
+	token, _, err := m.signer.GenerateAuthTokenFromCredentialsProvider(context.Background(), m.region, m.credentials)
 	return &sarama.AccessToken{Token: token}, err
 }
 
-// AuthTokenGenerator defines generate auth token functions from
+// AuthTokenGenerator defines GenerateAuthTokenFromCredentialsProvider from
 // https://github.com/aws/aws-msk-iam-sasl-signer-go
-// that can be mocked in tests
+// this is so it can be mocked in tests
 type AuthTokenGenerator interface {
-	GenerateAuthToken(ctx context.Context, region string) (string, int64, error)
-	GenerateAuthTokenFromProfile(ctx context.Context, region, profile string) (string, int64, error)
-	GenerateAuthTokenFromRole(ctx context.Context, region, roleArn, sessionName string) (string, int64, error)
-	GenerateAuthTokenFromRoleWithExternalID(ctx context.Context, region, roleArn, sessionName, externalID string) (string, int64, error)
+	GenerateAuthTokenFromCredentialsProvider(ctx context.Context, region string, credentialsProvider aws.CredentialsProvider) (string, int64, error)
 }
 
 // awsMskSaslSigner uses github.com/aws/aws-msk-iam-sasl-signer-go/signer to generate auth tokens
 type awsMskSaslSigner struct{}
 
-func (s *awsMskSaslSigner) GenerateAuthToken(ctx context.Context, region string) (string, int64, error) {
-	return signer.GenerateAuthToken(ctx, region)
-}
-
-func (s *awsMskSaslSigner) GenerateAuthTokenFromProfile(ctx context.Context, region, profile string) (string, int64, error) {
-	return signer.GenerateAuthTokenFromProfile(ctx, region, profile)
-}
-
-func (s *awsMskSaslSigner) GenerateAuthTokenFromRole(ctx context.Context, region, roleArn, sessionName string) (string, int64, error) {
-	return signer.GenerateAuthTokenFromRole(ctx, region, roleArn, sessionName)
-}
-
-func (s *awsMskSaslSigner) GenerateAuthTokenFromRoleWithExternalID(ctx context.Context, region, roleArn, sessionName, externalID string) (string, int64, error) {
-	return signer.GenerateAuthTokenFromRoleWithExternalId(ctx, region, roleArn, sessionName, externalID)
+func (s *awsMskSaslSigner) GenerateAuthTokenFromCredentialsProvider(ctx context.Context, region string, credentials aws.CredentialsProvider) (string, int64, error) {
+	return signer.GenerateAuthTokenFromCredentialsProvider(ctx, region, credentials)
 }
