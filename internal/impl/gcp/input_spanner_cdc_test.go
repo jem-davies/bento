@@ -87,6 +87,7 @@ func TestGcpSpannerCDCInput_Connect(t *testing.T) {
 		},
 		subscriber:  &mockSubscriber{},
 		closeSignal: shutdown.NewSignaller(),
+		subDone:     make(chan struct{}),
 	}
 
 	err := input.Connect(ctx)
@@ -169,6 +170,7 @@ func TestGcpSpannerCDCInput_SigTerm(t *testing.T) {
 		subscriber:  mockSub,
 		log:         nil,
 		closeSignal: shutdown.NewSignaller(),
+		subDone:     make(chan struct{}),
 	}
 
 	// Connect the input
