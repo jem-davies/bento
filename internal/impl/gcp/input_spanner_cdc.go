@@ -7,16 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	spanner "cloud.google.com/go/spanner"
+	"github.com/Jeffail/shutdown"
 	"github.com/anicoll/screamer"
 	"github.com/anicoll/screamer/pkg/partitionstorage"
 	"github.com/google/uuid"
-	"github.com/googleapis/gax-go/v2/apierror"
 	"github.com/warpstreamlabs/bento/public/service"
-	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -97,8 +97,7 @@ func cdcConfigFromParsed(pConf *service.ParsedConfig) (conf cdcConfig, err error
 
 func spannerCdcSpec() *service.ConfigSpec {
 	return service.NewConfigSpec().
-		Beta().
-		Version("1.8.0").
+		Version("1.10.0").
 		Categories("Services", "GCP").
 		Summary(`Consumes Spanner Change Stream Events from a GCP Spanner instance.`).
 		Description(`
@@ -183,6 +182,9 @@ type gcpSpannerCDCInput struct {
 	subscriber     subscriber         // Change stream subscriber
 	log            *service.Logger    // Logger instance
 	consumer       consumer           // Message consumer implementation
+
+	closeSignal *shutdown.Signaller
+	subDone     chan struct{}
 }
 
 // consumer implements the message consumption interface
@@ -237,6 +239,8 @@ func newGcpSpannerCDCInput(conf cdcConfig, res *service.Resources) (*gcpSpannerC
 		consumer: consumer{
 			msgQueue: make(chan []byte, 1000),
 		},
+		closeSignal: shutdown.NewSignaller(),
+		subDone:     make(chan struct{}),
 	}, nil
 }
 
@@ -244,77 +248,82 @@ func newGcpSpannerCDCInput(conf cdcConfig, res *service.Resources) (*gcpSpannerC
 func (c *gcpSpannerCDCInput) Connect(ctx context.Context) error {
 	c.cdcMut.Lock()
 	defer c.cdcMut.Unlock()
-	if c.subscriber == nil {
-		return service.ErrNotConnected
+
+	if c.closeSignal.IsSoftStopSignalled() {
+		return service.ErrEndOfInput
 	}
 
-	subCtx, cancel := context.WithCancel(context.Background())
+	subCtx, cancel := c.closeSignal.SoftStopCtx(context.Background())
 	c.closeFunc = cancel
 
+	errChan := make(chan error, 1)
+
 	go func() {
+		defer close(c.subDone)
 		rerr := c.subscriber.Subscribe(subCtx, c.consumer)
-
-		var apiErr *apierror.APIError
-		if errors.As(rerr, &apiErr) {
-			if apiErr.GRPCStatus().Code() == codes.Canceled {
-				c.log.Infof("Subscription cancelled: %v\n", apiErr)
-			} else {
-				c.log.Errorf("API error during subscription: %v\n", apiErr)
-			}
-		} else {
-			c.log.Errorf("Subscription error: %v\n", rerr)
-		}
-
-		c.cdcMut.Lock()
-		close(c.consumer.msgQueue)
-		c.closeFunc = nil
-		c.cdcMut.Unlock()
+		errChan <- rerr
 	}()
+
+	ticker := time.NewTicker(time.Second * 3)
+	defer ticker.Stop()
+
+	select {
+	case err := <-errChan:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("subscription error: %v", err)
+		}
+	case <-ticker.C:
+	}
 	return nil
 }
 
 // Read retrieves the next message from the change stream
 func (c *gcpSpannerCDCInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
-	var data []byte
-	var open bool
 	select {
-	case data, open = <-c.consumer.msgQueue:
-	case <-ctx.Done():
-		// If context is cancelled, ensure we call closeFunc to clean up resources
-		c.cdcMut.Lock()
-		if c.closeFunc != nil {
-			c.closeFunc()
+	case data, open := <-c.consumer.msgQueue:
+		if !open {
+			return nil, nil, service.ErrEndOfInput
 		}
-		c.cdcMut.Unlock()
-		c.log.Error("Context cancelled while waiting for data :" + ctx.Err().Error())
-		return nil, nil, service.ErrNotConnected
-	}
-	if !open {
-		return nil, nil, service.ErrNotConnected
-	}
-	dcr := screamer.DataChangeRecord{}
-	err := json.Unmarshal(data, &dcr)
-	if err != nil {
-		return nil, nil, err
-	}
-	msg := service.NewMessage(data)
+		dcr := screamer.DataChangeRecord{}
+		err := json.Unmarshal(data, &dcr)
+		if err != nil {
+			return nil, nil, err
+		}
+		msg := service.NewMessage(data)
 
-	msg.MetaSetMut(metadataTimestamp, dcr.CommitTimestamp.Format(time.RFC3339Nano))
-	msg.MetaSetMut(metadataModType, string(dcr.ModType))
-	msg.MetaSetMut(metadataTableName, dcr.TableName)
-	msg.MetaSetMut(metadataServerTxnID, dcr.ServerTransactionID)
-	msg.MetaSetMut(metadataRecordSeq, dcr.RecordSequence)
+		msg.MetaSetMut(metadataTimestamp, dcr.CommitTimestamp.Format(time.RFC3339Nano))
+		msg.MetaSetMut(metadataModType, string(dcr.ModType))
+		msg.MetaSetMut(metadataTableName, dcr.TableName)
+		msg.MetaSetMut(metadataServerTxnID, dcr.ServerTransactionID)
+		msg.MetaSetMut(metadataRecordSeq, dcr.RecordSequence)
 
-	return msg, func(ctx context.Context, res error) error {
-		return nil
-	}, nil
+		return msg, func(ctx context.Context, res error) error {
+			return nil
+		}, nil
+
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
 }
 
 // Close cleanly shuts down the input component
 func (c *gcpSpannerCDCInput) Close(ctx context.Context) error {
 	c.cdcMut.Lock()
 	defer c.cdcMut.Unlock()
+	defer c.tidyFunc()
 
+	c.closeSignal.TriggerSoftStop()
+
+	select {
+	case <-c.subDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	return nil
+}
+
+func (c *gcpSpannerCDCInput) tidyFunc() {
 	if c.closeFunc != nil {
 		c.closeFunc()
 		c.closeFunc = nil
@@ -325,5 +334,5 @@ func (c *gcpSpannerCDCInput) Close(ctx context.Context) error {
 	if c.streamClient != nil {
 		c.streamClient.Close()
 	}
-	return nil
+	close(c.consumer.msgQueue)
 }
