@@ -252,7 +252,7 @@ func (c *gcpSpannerCDCInput) Connect(ctx context.Context) error {
 	subCtx, cancel := c.closeSignal.SoftStopCtx(context.Background())
 	c.closeFunc = cancel
 
-	errChan := make(chan error, 1)
+	errChan := make(chan error)
 
 	go func() {
 		defer close(c.subDone)
@@ -260,15 +260,12 @@ func (c *gcpSpannerCDCInput) Connect(ctx context.Context) error {
 		errChan <- rerr
 	}()
 
-	ticker := time.NewTicker(time.Second * 3)
-	defer ticker.Stop()
-
 	select {
 	case err := <-errChan:
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("subscription error: %v", err)
 		}
-	case <-ticker.C:
+	case <-time.After(time.Second * 3):
 	}
 	return nil
 }
