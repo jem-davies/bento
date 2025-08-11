@@ -167,21 +167,17 @@ func init() {
 	}
 }
 
-type subscriber interface {
-	Subscribe(ctx context.Context, consumer screamer.Consumer) error
-}
-
 // gcpSpannerCDCInput implements a Bento input component that reads from Spanner change streams
 type gcpSpannerCDCInput struct {
-	conf           cdcConfig          // Configuration for this input
-	runnerID       string             // Unique ID for this consumer instance
-	streamClient   *spanner.Client    // Client for reading change stream data
-	metadataClient *spanner.Client    // Client for metadata operations
-	closeFunc      context.CancelFunc // Function to cancel ongoing operations
-	cdcMut         sync.Mutex         // Mutex for thread-safe operations
-	subscriber     subscriber         // Change stream subscriber
-	log            *service.Logger    // Logger instance
-	consumer       consumer           // Message consumer implementation
+	conf           cdcConfig            // Configuration for this input
+	runnerID       string               // Unique ID for this consumer instance
+	streamClient   *spanner.Client      // Client for reading change stream data
+	metadataClient *spanner.Client      // Client for metadata operations
+	closeFunc      context.CancelFunc   // Function to cancel ongoing operations
+	cdcMut         sync.Mutex           // Mutex for thread-safe operations
+	subscriber     *screamer.Subscriber // Change stream subscriber
+	log            *service.Logger      // Logger instance
+	consumer       consumer             // Message consumer implementation
 
 	closeSignal *shutdown.Signaller
 	subDone     chan struct{}
