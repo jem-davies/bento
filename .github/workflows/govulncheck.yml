@@ -17,7 +17,7 @@ jobs:
       security-events: write
       contents: read
     steps:
-      - uses: golang/govulncheck-action@blatest
+      - uses: golang/govulncheck-action@latest
         with:
           # NOTE that we want to produce the SARIF-formatted report, which can then be consumed by other tools ...
           output-format: sarif
