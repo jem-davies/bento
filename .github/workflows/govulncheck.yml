@@ -23,6 +23,15 @@ jobs:
           output-format: sarif
           output-file: govulncheck.sarif
 
+      # Clean up duplicate stacks in SARIF file
+      - name: Clean SARIF file
+        run: |
+          if [ -f govulncheck.sarif ]; then
+            # Use jq to remove duplicate stacks while preserving the rest of the SARIF structure
+            jq '.runs[].results[]?.stacks |= if type == "array" then unique else . end' govulncheck.sarif > govulncheck_clean.sarif
+            mv govulncheck_clean.sarif govulncheck.sarif
+          fi
+
       # ... such as the Code Scanning tab (https://github.com/oapi-codegen/oapi-codegen/security/code-scanning?query=is%3Aopen+branch%3Amain+tool%3Agovulncheck)
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v3.30.3
