@@ -24,7 +24,7 @@ func startTestServer(t *testing.T) func() {
 	return func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
 }
 
-func repoRoot(t *testing.T) string {
+func repoRoot(t *testing.T) string { // JEM PR: unused variable
 	_, file, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(file)
 	return filepath.Clean(filepath.Join(dir, "../../../"))
