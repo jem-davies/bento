@@ -74,6 +74,7 @@ type grpcServerInput struct {
 	address      string
 	serviceDesc  grpc.ServiceDesc
 	structpbChan chan (*structpb.Struct)
+	server       *grpc.Server
 }
 
 func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resources) (*grpcServerInput, error) {
@@ -115,30 +116,43 @@ func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resou
 }
 
 func (gsi *grpcServerInput) Connect(ctx context.Context) error {
+	if gsi.server != nil {
+		return nil
+	}
+
 	lis, err := net.Listen("tcp", gsi.address)
 	if err != nil {
 		return err
 	}
-	s := grpc.NewServer()
+	gsi.server = grpc.NewServer()
 
-	s.RegisterService(&gsi.serviceDesc, nil)
+	gsi.server.RegisterService(&gsi.serviceDesc, nil)
 
-	go s.Serve(lis)
+	go gsi.server.Serve(lis)
 
 	return nil
 }
 
 func (gsi *grpcServerInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
-	structpb := <-gsi.structpbChan
 
-	msgBytes, err := structpb.MarshalJSON()
-	if err != nil {
-		return nil, nil, err
+	select {
+	case structpb, open := <-gsi.structpbChan:
+		if !open {
+			return nil, nil, service.ErrNotConnected
+		}
+
+		msgBytes, err := structpb.MarshalJSON()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return []*service.Message{service.NewMessage(msgBytes)}, func(context.Context, error) error { return nil }, nil
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
 	}
-
-	return []*service.Message{service.NewMessage(msgBytes)}, func(context.Context, error) error { return nil }, nil
 }
 
 func (gsi *grpcServerInput) Close(ctx context.Context) error {
+	gsi.server.GracefulStop()
 	return nil
 }
