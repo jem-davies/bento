@@ -22,7 +22,7 @@ func grpcServerInputConfigSpec() *service.ConfigSpec {
 		Fields(
 			service.NewStringField(gsiServiceName).
 				Description("TODO").
-				Default("echo.Echo"),
+				Default("bento.Bento"),
 		)
 }
 
