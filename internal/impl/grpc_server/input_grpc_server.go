@@ -11,7 +11,9 @@ import (
 )
 
 const (
+	gsiAddress     = "address"
 	gsiServiceName = "service_name"
+	gsiStreamName  = "stream_name"
 )
 
 func grpcServerInputConfigSpec() *service.ConfigSpec {
@@ -23,6 +25,12 @@ func grpcServerInputConfigSpec() *service.ConfigSpec {
 			service.NewStringField(gsiServiceName).
 				Description("TODO").
 				Default("bento.Bento"),
+			service.NewStringField(gsiAddress).
+				Description("TODO").
+				Default(":50051"),
+			service.NewStringField(gsiStreamName).
+				Description("TODO").
+				Default("Stream"),
 		)
 }
 
@@ -63,12 +71,23 @@ func create_handler(structpbChan chan (*structpb.Struct)) func(_ any, stream grp
 //------------------------------------------------------------------------------
 
 type grpcServerInput struct {
+	address      string
 	serviceDesc  grpc.ServiceDesc
 	structpbChan chan (*structpb.Struct)
 }
 
 func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resources) (*grpcServerInput, error) {
+	address, err := conf.FieldString(gsiAddress)
+	if err != nil {
+		return nil, err
+	}
+
 	serviceName, err := conf.FieldString(gsiServiceName)
+	if err != nil {
+		return nil, err
+	}
+
+	streamName, err := conf.FieldString(gsiStreamName)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +98,7 @@ func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resou
 		ServiceName: serviceName,
 		HandlerType: (*any)(nil),
 		Streams: []grpc.StreamDesc{{
-			StreamName:    "Stream",
+			StreamName:    streamName,
 			Handler:       create_handler(structpbChan),
 			ServerStreams: true,
 			ClientStreams: false,
@@ -87,6 +106,7 @@ func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resou
 	}
 
 	gsi := grpcServerInput{
+		address:      address,
 		serviceDesc:  bentoService,
 		structpbChan: structpbChan,
 	}
@@ -95,7 +115,7 @@ func newGrpcServerInputFromConfig(conf *service.ParsedConfig, mgr *service.Resou
 }
 
 func (gsi *grpcServerInput) Connect(ctx context.Context) error {
-	lis, err := net.Listen("tcp", ":50051")
+	lis, err := net.Listen("tcp", gsi.address)
 	if err != nil {
 		return err
 	}
