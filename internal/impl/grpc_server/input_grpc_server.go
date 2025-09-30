@@ -2,7 +2,6 @@ package grpcserver
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 
@@ -110,9 +109,14 @@ func (gsi *grpcServerInput) Connect(ctx context.Context) error {
 }
 
 func (gsi *grpcServerInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
-	msg := <-gsi.structpbChan
-	fmt.Println(msg)
-	return nil, nil, nil
+	structpb := <-gsi.structpbChan
+
+	msgBytes, err := structpb.MarshalJSON()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return []*service.Message{service.NewMessage(msgBytes)}, func(context.Context, error) error { return nil }, nil
 }
 
 func (gsi *grpcServerInput) Close(ctx context.Context) error {
