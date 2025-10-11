@@ -2,6 +2,7 @@ package grpc_client_jem
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
@@ -17,6 +18,7 @@ const (
 	grpcClientOutputService  = "service"
 	grpcClientOutputMethod   = "method"
 	grpcClientOutputBatching = "batching"
+	grpcClientOutputPropRes  = "propagate_response"
 )
 
 func grcpClientOutputSpec() *service.ConfigSpec {
@@ -34,6 +36,10 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 			service.NewStringField(grpcClientOutputMethod).
 				Description("TODO").
 				Example("SayHello"),
+			service.NewBoolField(grpcClientOutputPropRes).
+				Description("TODO").
+				Default(false).
+				Advanced(),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
 		)
@@ -61,9 +67,10 @@ func init() {
 //------------------------------------------------------------------------------
 
 type grpcClientWriter struct {
-	address     string
-	serviceName string
-	methodName  string
+	address      string
+	serviceName  string
+	methodName   string
+	propResponse bool
 
 	conn *grpc.ClientConn
 
@@ -84,11 +91,16 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 	if err != nil {
 		return nil, err
 	}
+	propResponse, err := conf.FieldBool(grpcClientOutputPropRes)
+	if err != nil {
+		return nil, err
+	}
 
 	writer := &grpcClientWriter{
-		address:     address,
-		serviceName: serviceName,
-		methodName:  methodName,
+		address:      address,
+		serviceName:  serviceName,
+		methodName:   methodName,
+		propResponse: propResponse,
 	}
 
 	return writer, nil
@@ -139,12 +151,27 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 			return err
 		}
 
-		_, err = gcw.stub.InvokeRpc(ctx, gcw.method, request)
+		resProtoMessage, err := gcw.stub.InvokeRpc(ctx, gcw.method, request)
 		if err != nil {
 			return err
 		}
-	}
+		if gcw.propResponse {
+			if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
+				jsonBytes, err := dynMsg.MarshalJSON()
+				if err != nil {
+					return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+				}
 
+				responseMsg := msg.Copy()
+				responseMsg.SetBytes(jsonBytes)
+
+				responseBatch := service.MessageBatch{responseMsg}
+				if err := responseBatch.AddSyncResponse(); err != nil {
+					return err
+				}
+			}
+		} // TODO: fallback for unexpected undynamic messages...
+	}
 	return nil
 }
 

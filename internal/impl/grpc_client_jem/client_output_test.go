@@ -12,6 +12,7 @@ import (
 	test_server "github.com/warpstreamlabs/bento/internal/impl/grpc_client_jem/grpc_test_server"
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/internal/message"
+	"github.com/warpstreamlabs/bento/internal/transaction"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -20,6 +21,9 @@ import (
 
 type testServer struct {
 	test_server.UnimplementedGreeterServer
+
+	reflection bool
+
 	mu                  sync.Mutex
 	sayHelloInvocations int
 }
@@ -31,25 +35,43 @@ func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (
 	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
 }
 
-func startGRPCServer(t *testing.T) *testServer {
+func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	t.Helper()
+
+	testServer := &testServer{}
+
+	for _, o := range opts {
+		o(testServer)
+	}
+
 	lis, err := net.Listen("tcp", ":50051")
 	assert.NoError(t, err)
 
 	s := grpc.NewServer()
 
-	reflection.Register(s)
-
-	testServer := &testServer{}
+	if testServer.reflection {
+		reflection.Register(s)
+	}
 
 	test_server.RegisterGreeterServer(s, testServer)
 	go s.Serve(lis)
 	return testServer
 }
 
-// ------------------------------------------------------------------------------
-func TestNewGrpcClientWriterBasic(t *testing.T) {
-	testServer := startGRPCServer(t)
+//------------------------------------------------------------------------------
+
+type testServerOpt func(*testServer)
+
+func withReflection() testServerOpt {
+	return func(ts *testServer) {
+		ts.reflection = true
+	}
+}
+
+//------------------------------------------------------------------------------
+
+func TestGrpcClientWriterBasicReflection(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
 
 	yamlConf := `
 grpc_client_jem:
@@ -84,6 +106,58 @@ grpc_client_jem:
 		select {
 		case res := <-receiveChan:
 			assert.NoError(t, res)
+		case <-time.After(time.Second * 60):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloInvocations)
+}
+
+func TestGrpcClientWriterSyncResponseReflection(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := `
+grpc_client_jem:
+  address: localhost:50051
+  service: helloworld.Greeter
+  method: SayHello
+  propagate_response: true
+`
+	conf, err := testutil.OutputFromYAML(yamlConf)
+	assert.NoError(t, err)
+
+	s, err := mock.NewManager().NewOutput(conf)
+	assert.NoError(t, err)
+
+	sendChan := make(chan message.Transaction)
+	receiveChan := make(chan error)
+
+	s.Consume(sendChan)
+	t.Cleanup(s.TriggerCloseNow)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+	names := []string{"Alice", "Bob", "Carol", "Dan"}
+
+	for i, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		resultStore := transaction.NewResultStore()
+		transaction.AddResultStore(testMsg, resultStore)
+
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Second * 60):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+			resMsgs := resultStore.Get()
+			resMsg := resMsgs[0]
+			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
 		case <-time.After(time.Second * 60):
 			t.Fatal("Action timed out")
 		}
