@@ -2,6 +2,7 @@ package grpc_client_jem
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ type testServer struct {
 
 	mu                  sync.Mutex
 	sayHelloInvocations int
+	port                int
 }
 
 func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
@@ -44,8 +46,10 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 		o(testServer)
 	}
 
-	lis, err := net.Listen("tcp", ":50051")
+	lis, err := net.Listen("tcp", ":0")
 	assert.NoError(t, err)
+
+	testServer.port = lis.Addr().(*net.TCPAddr).Port
 
 	s := grpc.NewServer()
 
@@ -73,23 +77,15 @@ func withReflection() testServerOpt {
 func TestGrpcClientWriterBasicReflection(t *testing.T) {
 	testServer := startGRPCServer(t, withReflection())
 
-	yamlConf := `
+	yamlConf := fmt.Sprintf(`
 grpc_client_jem:
-  address: localhost:50051
+  address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
-`
-	conf, err := testutil.OutputFromYAML(yamlConf)
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
 	assert.NoError(t, err)
-
-	s, err := mock.NewManager().NewOutput(conf)
-	assert.NoError(t, err)
-
-	sendChan := make(chan message.Transaction)
-	receiveChan := make(chan error)
-
-	s.Consume(sendChan)
-	t.Cleanup(s.TriggerCloseNow)
 
 	inputs := []string{
 		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
@@ -117,24 +113,16 @@ grpc_client_jem:
 func TestGrpcClientWriterSyncResponseReflection(t *testing.T) {
 	testServer := startGRPCServer(t, withReflection())
 
-	yamlConf := `
+	yamlConf := fmt.Sprintf(`
 grpc_client_jem:
-  address: localhost:50051
+  address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
   propagate_response: true
-`
-	conf, err := testutil.OutputFromYAML(yamlConf)
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
 	assert.NoError(t, err)
-
-	s, err := mock.NewManager().NewOutput(conf)
-	assert.NoError(t, err)
-
-	sendChan := make(chan message.Transaction)
-	receiveChan := make(chan error)
-
-	s.Consume(sendChan)
-	t.Cleanup(s.TriggerCloseNow)
 
 	inputs := []string{
 		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
@@ -164,4 +152,32 @@ grpc_client_jem:
 	}
 
 	assert.Equal(t, 4, testServer.sayHelloInvocations)
+}
+
+//------------------------------------------------------------------------------
+
+func startGrpcClientOutput(t *testing.T, yamlConf string) (
+	sendChan chan message.Transaction,
+	receiveChan chan error,
+	err error,
+) {
+	t.Helper()
+
+	conf, err := testutil.OutputFromYAML(yamlConf)
+	if err != nil {
+		return
+	}
+
+	s, err := mock.NewManager().NewOutput(conf)
+	if err != nil {
+		return
+	}
+
+	sendChan = make(chan message.Transaction)
+	receiveChan = make(chan error)
+
+	s.Consume(sendChan)
+	t.Cleanup(s.TriggerCloseNow)
+
+	return sendChan, receiveChan, nil
 }
