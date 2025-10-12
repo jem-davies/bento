@@ -15,6 +15,7 @@ import (
 	"github.com/warpstreamlabs/bento/internal/message"
 	"github.com/warpstreamlabs/bento/internal/transaction"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -24,6 +25,7 @@ type testServer struct {
 	test_server.UnimplementedGreeterServer
 
 	reflection bool
+	tls        bool
 
 	mu                  sync.Mutex
 	sayHelloInvocations int
@@ -51,7 +53,17 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 
 	testServer.port = lis.Addr().(*net.TCPAddr).Port
 
-	s := grpc.NewServer()
+	serverOpts := []grpc.ServerOption{}
+
+	if testServer.tls {
+		creds, err := credentials.NewServerTLSFromFile("./grpc_test_server/server_cert.pem", "./grpc_test_server/server_key.pem")
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+	}
+
+	s := grpc.NewServer(serverOpts...)
 
 	if testServer.reflection {
 		reflection.Register(s)
@@ -69,6 +81,12 @@ type testServerOpt func(*testServer)
 func withReflection() testServerOpt {
 	return func(ts *testServer) {
 		ts.reflection = true
+	}
+}
+
+func withTLS() testServerOpt {
+	return func(ts *testServer) {
+		ts.tls = true
 	}
 }
 
@@ -146,6 +164,49 @@ grpc_client_jem:
 			resMsgs := resultStore.Get()
 			resMsg := resMsgs[0]
 			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
+		case <-time.After(time.Second * 60):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloInvocations)
+}
+
+func TestGrpcClientWriterTLS(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection(), withTLS())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  tls:
+    enabled: true
+    root_cas_file: ./grpc_test_server/client_ca_cert.pem
+    client_certs:
+      - cert_file: ./grpc_test_server/client_cert.pem
+        key_file: ./grpc_test_server/client_key.pem
+    skip_cert_verify: true
+`, testServer.port) // TODO: have skip_cert_verify: false
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	for _, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Second * 60):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
 		case <-time.After(time.Second * 60):
 			t.Fatal("Action timed out")
 		}

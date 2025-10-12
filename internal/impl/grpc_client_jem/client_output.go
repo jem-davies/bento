@@ -2,6 +2,7 @@ package grpc_client_jem
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"github.com/jhump/protoreflect/desc"
@@ -10,6 +11,7 @@ import (
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/warpstreamlabs/bento/public/service"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -19,6 +21,7 @@ const (
 	grpcClientOutputMethod   = "method"
 	grpcClientOutputBatching = "batching"
 	grpcClientOutputPropRes  = "propagate_response"
+	grpcClientOutputTls      = "tls"
 )
 
 func grcpClientOutputSpec() *service.ConfigSpec {
@@ -40,6 +43,7 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 				Description("TODO").
 				Default(false).
 				Advanced(),
+			service.NewTLSToggledField(grpcClientOutputTls),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
 		)
@@ -71,6 +75,7 @@ type grpcClientWriter struct {
 	serviceName  string
 	methodName   string
 	propResponse bool
+	tls          *tls.Config
 
 	conn *grpc.ClientConn
 
@@ -95,12 +100,17 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 	if err != nil {
 		return nil, err
 	}
+	tls, err := conf.FieldTLS(grpcClientOutputTls)
+	if err != nil {
+		return nil, err
+	}
 
 	writer := &grpcClientWriter{
 		address:      address,
 		serviceName:  serviceName,
 		methodName:   methodName,
 		propResponse: propResponse,
+		tls:          tls,
 	}
 
 	return writer, nil
@@ -112,7 +122,18 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	if gcw.conn != nil {
 		return nil
 	}
-	gcw.conn, err = grpc.NewClient(gcw.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+
+	dialOpts := []grpc.DialOption{}
+
+	if gcw.tls != nil {
+		fmt.Println("gcw.tls not nil")
+		creds := credentials.NewTLS(gcw.tls)
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(creds))
+	} else {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	gcw.conn, err = grpc.NewClient(gcw.address, dialOpts...)
 	if err != nil {
 		return err
 	}
@@ -122,10 +143,13 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 
 	serviceDescriptor, err := reflectClient.ResolveService(gcw.serviceName)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	gcw.method = serviceDescriptor.FindMethodByName(gcw.methodName)
+	if gcw.method == nil {
+		return fmt.Errorf("method: %v not found", gcw.methodName)
+	}
 
 	gcw.stub = grpcdynamic.NewStub(gcw.conn)
 
