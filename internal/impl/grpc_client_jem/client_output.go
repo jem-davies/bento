@@ -13,15 +13,20 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	_ "google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
 const (
-	grpcClientOutputAddress  = "address"
-	grpcClientOutputService  = "service"
-	grpcClientOutputMethod   = "method"
-	grpcClientOutputBatching = "batching"
-	grpcClientOutputPropRes  = "propagate_response"
-	grpcClientOutputTls      = "tls"
+	grpcClientOutputAddress                = "address"
+	grpcClientOutputService                = "service"
+	grpcClientOutputMethod                 = "method"
+	grpcClientOutputBatching               = "batching"
+	grpcClientOutputPropRes                = "propagate_response"
+	grpcClientOutputTls                    = "tls"
+	grpcClientOutputHealthCheck            = "health_check"
+	grpcClientOutputHealthCheckToggle      = "enabled"
+	grpcClientOutputHealthCheckServiceName = "service_name"
 )
 
 func grcpClientOutputSpec() *service.ConfigSpec {
@@ -43,6 +48,16 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 				Description("TODO").
 				Default(false).
 				Advanced(),
+			service.NewObjectField(grpcClientOutputHealthCheck,
+				service.NewBoolField(grpcClientOutputHealthCheckToggle).
+					Description("TODO").
+					Default(false).
+					Advanced(),
+				service.NewStringField(grpcClientOutputHealthCheckServiceName).
+					Description("TODO").
+					Default("").
+					Advanced(),
+			),
 			service.NewTLSToggledField(grpcClientOutputTls),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
@@ -71,11 +86,13 @@ func init() {
 //------------------------------------------------------------------------------
 
 type grpcClientWriter struct {
-	address      string
-	serviceName  string
-	methodName   string
-	propResponse bool
-	tls          *tls.Config
+	address                string
+	serviceName            string
+	methodName             string
+	propResponse           bool
+	tls                    *tls.Config
+	healthCheckEnabled     bool
+	healthCheckServiceName string
 
 	conn *grpc.ClientConn
 
@@ -105,12 +122,25 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		return nil, err
 	}
 
+	healthCheckConf := conf.Namespace(grpcClientOutputHealthCheck)
+	healthCheckEnabled, err := healthCheckConf.FieldBool(grpcClientOutputHealthCheckToggle)
+	fmt.Printf("healhCheckEnabled: %v\n", healthCheckEnabled)
+	if err != nil {
+		return nil, err
+	}
+	healthCheckServiceName, err := healthCheckConf.FieldString(grpcClientOutputHealthCheckServiceName)
+	if err != nil {
+		return nil, err
+	}
+
 	writer := &grpcClientWriter{
-		address:      address,
-		serviceName:  serviceName,
-		methodName:   methodName,
-		propResponse: propResponse,
-		tls:          tls,
+		address:                address,
+		serviceName:            serviceName,
+		methodName:             methodName,
+		propResponse:           propResponse,
+		tls:                    tls,
+		healthCheckEnabled:     healthCheckEnabled,
+		healthCheckServiceName: healthCheckServiceName,
 	}
 
 	return writer, nil
@@ -133,9 +163,33 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
+	if gcw.healthCheckEnabled {
+		fmt.Println("HEALTH CHECK ENABLED")
+		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName)
+		dialOpts = append(dialOpts, grpc.WithDefaultServiceConfig(serviceConf))
+	}
+
 	gcw.conn, err = grpc.NewClient(gcw.address, dialOpts...)
 	if err != nil {
 		return err
+	}
+
+	// perform health check:
+	if gcw.healthCheckEnabled {
+		fmt.Println("PERFORMING HEALTH CHECK")
+		healthClient := grpc_health_v1.NewHealthClient(gcw.conn)
+		resp, err := healthClient.Check(ctx, &grpc_health_v1.HealthCheckRequest{
+			Service: gcw.healthCheckServiceName,
+		})
+		if err != nil {
+			fmt.Println("HEALTH CHECK FAILED")
+			return fmt.Errorf("health check failed: %w", err)
+		}
+		if resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
+			fmt.Println("HEALTH CHECK SERVICE NOT HEALTHY")
+			return fmt.Errorf("service %q not healthy: %v", gcw.healthCheckServiceName, resp.GetStatus())
+		}
+		fmt.Println("Health check OK for service:", gcw.healthCheckServiceName)
 	}
 
 	reflectClient := grpcreflect.NewClientAuto(ctx, gcw.conn)

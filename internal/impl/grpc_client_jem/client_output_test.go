@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/warpstreamlabs/bento/internal/component/testutil"
 	test_server "github.com/warpstreamlabs/bento/internal/impl/grpc_client_jem/grpc_test_server"
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
@@ -24,8 +25,9 @@ import (
 type testServer struct {
 	test_server.UnimplementedGreeterServer
 
-	reflection bool
-	tls        bool
+	reflection  bool
+	tls         bool
+	healthCheck bool
 
 	mu                  sync.Mutex
 	sayHelloInvocations int
@@ -87,6 +89,12 @@ func withReflection() testServerOpt {
 func withTLS() testServerOpt {
 	return func(ts *testServer) {
 		ts.tls = true
+	}
+}
+
+func withHealthCheck() testServerOpt {
+	return func(ts *testServer) {
+		ts.healthCheck = true
 	}
 }
 
@@ -241,4 +249,27 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 	t.Cleanup(s.TriggerCloseNow)
 
 	return sendChan, receiveChan, nil
+}
+func TestGrpcClientWriterHealthCheck(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+address: localhost:%v
+service: helloworld.Greeter
+method: SayHello
+health_check:
+  enabled: true
+  service_name: ""
+`, testServer.port)
+
+	pConf, err := grcpClientOutputSpec().ParseYAML(yamlConf, nil)
+	require.NoError(t, err)
+
+	foo, err := newGrpcClientWriterFromParsed(pConf, nil)
+
+	ctx := context.Background()
+	err = foo.Connect(ctx)
+
+	require.NoError(t, err)
+
 }
