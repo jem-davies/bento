@@ -17,6 +17,8 @@ import (
 	"github.com/warpstreamlabs/bento/internal/transaction"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -66,6 +68,12 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	}
 
 	s := grpc.NewServer(serverOpts...)
+
+	if testServer.healthCheck {
+		hc := health.NewServer()
+		healthgrpc.RegisterHealthServer(s, hc)
+		hc.SetServingStatus("", healthgrpc.HealthCheckResponse_SERVING)
+	}
 
 	if testServer.reflection {
 		reflection.Register(s)
@@ -251,7 +259,7 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 	return sendChan, receiveChan, nil
 }
 func TestGrpcClientWriterHealthCheck(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
+	testServer := startGRPCServer(t, withReflection(), withHealthCheck())
 
 	yamlConf := fmt.Sprintf(`
 address: localhost:%v
@@ -271,5 +279,4 @@ health_check:
 	err = foo.Connect(ctx)
 
 	require.NoError(t, err)
-
 }
