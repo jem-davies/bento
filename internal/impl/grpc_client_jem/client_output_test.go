@@ -116,6 +116,7 @@ grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
+  reflection: true
 `, testServer.port)
 
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
@@ -129,14 +130,14 @@ grpc_client_jem:
 		testMsg := message.QuickBatch([][]byte{[]byte(input)})
 		select {
 		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 
 		select {
 		case res := <-receiveChan:
 			assert.NoError(t, res)
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 	}
@@ -153,6 +154,7 @@ grpc_client_jem:
   service: helloworld.Greeter
   method: SayHello
   propagate_response: true
+  reflection: true
 `, testServer.port)
 
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
@@ -170,7 +172,7 @@ grpc_client_jem:
 
 		select {
 		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 
@@ -180,7 +182,7 @@ grpc_client_jem:
 			resMsgs := resultStore.Get()
 			resMsg := resMsgs[0]
 			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 	}
@@ -196,6 +198,7 @@ grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
+  reflection: true
   tls:
     enabled: true
     root_cas_file: ./grpc_test_server/client_ca_cert.pem
@@ -216,14 +219,14 @@ grpc_client_jem:
 		testMsg := message.QuickBatch([][]byte{[]byte(input)})
 		select {
 		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 
 		select {
 		case res := <-receiveChan:
 			assert.NoError(t, res)
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
 	}
@@ -265,6 +268,7 @@ func TestGrpcClientWriterHealthCheck(t *testing.T) {
 address: localhost:%v
 service: helloworld.Greeter
 method: SayHello
+reflection: true
 health_check:
   enabled: true
   service_name: ""
@@ -274,9 +278,47 @@ health_check:
 	require.NoError(t, err)
 
 	foo, err := newGrpcClientWriterFromParsed(pConf, nil)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	err = foo.Connect(ctx)
-
 	require.NoError(t, err)
+}
+
+func TestGrpcClientWriterBasicProtoFile(t *testing.T) {
+	testServer := startGRPCServer(t)
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  proto_files: 
+    - "./grpc_test_server/helloworld.proto"
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	for _, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloInvocations)
 }

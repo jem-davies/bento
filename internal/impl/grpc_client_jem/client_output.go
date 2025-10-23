@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jhump/protoreflect/desc"
+	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
@@ -21,6 +22,8 @@ const (
 	grpcClientOutputAddress                = "address"
 	grpcClientOutputService                = "service"
 	grpcClientOutputMethod                 = "method"
+	grpcClientOutputReflection             = "reflection"
+	grpcClientOutputProtoFiles             = "proto_files"
 	grpcClientOutputBatching               = "batching"
 	grpcClientOutputPropRes                = "propagate_response"
 	grpcClientOutputTls                    = "tls"
@@ -44,6 +47,12 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 			service.NewStringField(grpcClientOutputMethod).
 				Description("TODO").
 				Example("SayHello"),
+			service.NewBoolField(grpcClientOutputReflection).
+				Description("TODO").
+				Default(false),
+			service.NewStringListField(grpcClientOutputProtoFiles).
+				Description("TODO").
+				Default([]string{}),
 			service.NewBoolField(grpcClientOutputPropRes).
 				Description("TODO").
 				Default(false).
@@ -89,6 +98,8 @@ type grpcClientWriter struct {
 	address                string
 	serviceName            string
 	methodName             string
+	reflection             bool
+	protoFiles             []string
 	propResponse           bool
 	tls                    *tls.Config
 	healthCheckEnabled     bool
@@ -113,6 +124,14 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 	if err != nil {
 		return nil, err
 	}
+	reflection, err := conf.FieldBool(grpcClientOutputReflection)
+	if err != nil {
+		return nil, err
+	}
+	protoFiles, err := conf.FieldStringList(grpcClientOutputProtoFiles)
+	if err != nil {
+		return nil, err
+	}
 	propResponse, err := conf.FieldBool(grpcClientOutputPropRes)
 	if err != nil {
 		return nil, err
@@ -124,7 +143,6 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 
 	healthCheckConf := conf.Namespace(grpcClientOutputHealthCheck)
 	healthCheckEnabled, err := healthCheckConf.FieldBool(grpcClientOutputHealthCheckToggle)
-	fmt.Printf("healhCheckEnabled: %v\n", healthCheckEnabled)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +155,8 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		address:                address,
 		serviceName:            serviceName,
 		methodName:             methodName,
+		reflection:             reflection,
+		protoFiles:             protoFiles,
 		propResponse:           propResponse,
 		tls:                    tls,
 		healthCheckEnabled:     healthCheckEnabled,
@@ -156,7 +176,6 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	dialOpts := []grpc.DialOption{}
 
 	if gcw.tls != nil {
-		fmt.Println("gcw.tls not nil")
 		creds := credentials.NewTLS(gcw.tls)
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(creds))
 	} else {
@@ -164,7 +183,6 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	}
 
 	if gcw.healthCheckEnabled {
-		fmt.Println("HEALTH CHECK ENABLED")
 		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName)
 		dialOpts = append(dialOpts, grpc.WithDefaultServiceConfig(serviceConf))
 	}
@@ -174,35 +192,59 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 		return err
 	}
 
-	// perform health check:
 	if gcw.healthCheckEnabled {
-		fmt.Println("PERFORMING HEALTH CHECK")
 		healthClient := grpc_health_v1.NewHealthClient(gcw.conn)
 		resp, err := healthClient.Check(ctx, &grpc_health_v1.HealthCheckRequest{
 			Service: gcw.healthCheckServiceName,
 		})
 		if err != nil {
-			fmt.Println("HEALTH CHECK FAILED")
 			return fmt.Errorf("health check failed: %w", err)
 		}
 		if resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
-			fmt.Println("HEALTH CHECK SERVICE NOT HEALTHY")
 			return fmt.Errorf("service %q not healthy: %v", gcw.healthCheckServiceName, resp.GetStatus())
 		}
-		fmt.Println("Health check OK for service:", gcw.healthCheckServiceName)
+		fmt.Println("Health check OK for service:", gcw.healthCheckServiceName) // TODO replace with a TRCE / DBUG LOG
 	}
 
-	reflectClient := grpcreflect.NewClientAuto(ctx, gcw.conn)
-	defer reflectClient.Reset() // TODO -> move to the gcw.Close()
+	if gcw.reflection {
+		reflectClient := grpcreflect.NewClientAuto(ctx, gcw.conn)
+		defer reflectClient.Reset() // TODO -> move to the gcw.Close()
 
-	serviceDescriptor, err := reflectClient.ResolveService(gcw.serviceName)
-	if err != nil {
-		return err
+		serviceDescriptor, err := reflectClient.ResolveService(gcw.serviceName)
+		if err != nil {
+			return err
+		}
+
+		gcw.method = serviceDescriptor.FindMethodByName(gcw.methodName)
+		if gcw.method == nil {
+			return fmt.Errorf("method: %v not found", gcw.methodName)
+		}
 	}
 
-	gcw.method = serviceDescriptor.FindMethodByName(gcw.methodName)
+	if len(gcw.protoFiles) != 0 {
+		var parser protoparse.Parser
+
+		fileDescriptors, err := parser.ParseFiles(gcw.protoFiles...)
+		if err != nil {
+			return err
+		}
+
+		// TODO - check this
+	Found:
+		for _, fileDescriptor := range fileDescriptors {
+			for _, service := range fileDescriptor.GetServices() {
+				if service.GetFullyQualifiedName() == gcw.serviceName || service.GetName() == gcw.serviceName {
+					if method := service.FindMethodByName(gcw.methodName); method != nil {
+						gcw.method = method
+						break Found
+					}
+				}
+			}
+		}
+	}
+
 	if gcw.method == nil {
-		return fmt.Errorf("method: %v not found", gcw.methodName)
+		return fmt.Errorf("unable to find method: %s in provided proto files", gcw.methodName)
 	}
 
 	gcw.stub = grpcdynamic.NewStub(gcw.conn)
@@ -224,7 +266,7 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 			return err
 		}
 
-		request := dynamic.NewMessage(gcw.method.GetInputType())
+		request := dynamic.NewMessage(gcw.method.GetInputType()) // TODO we can panic here
 		if err := request.UnmarshalJSON(msgBytes); err != nil {
 			return err
 		}
