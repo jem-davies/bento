@@ -169,7 +169,7 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 //------------------------------------------------------------------------------
 
 func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
-	if gcw.conn != nil {
+	if gcw.conn != nil && gcw.method != nil {
 		return nil
 	}
 
@@ -208,16 +208,18 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 
 	if gcw.reflection {
 		reflectClient := grpcreflect.NewClientAuto(ctx, gcw.conn)
-		defer reflectClient.Reset() // TODO -> move to the gcw.Close()
+		// defer reflectClient.Reset() // TODO -> move to the gcw.Close()
 
 		serviceDescriptor, err := reflectClient.ResolveService(gcw.serviceName)
 		if err != nil {
 			return err
 		}
 
-		gcw.method = serviceDescriptor.FindMethodByName(gcw.methodName)
-		if gcw.method == nil {
+		if method := serviceDescriptor.FindMethodByName(gcw.methodName); method != nil {
+			gcw.method = method
+		} else {
 			return fmt.Errorf("method: %v not found", gcw.methodName)
+			//return service.ErrNotConnected
 		}
 	}
 
@@ -253,7 +255,7 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 }
 
 func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.MessageBatch) error {
-	if gcw.conn == nil {
+	if gcw.conn == nil || gcw.method == nil {
 		return service.ErrNotConnected
 	}
 
@@ -266,7 +268,7 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 			return err
 		}
 
-		request := dynamic.NewMessage(gcw.method.GetInputType()) // TODO we can panic here
+		request := dynamic.NewMessage(gcw.method.GetInputType())
 		if err := request.UnmarshalJSON(msgBytes); err != nil {
 			return err
 		}

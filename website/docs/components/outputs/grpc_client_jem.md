@@ -36,6 +36,9 @@ output:
     address: localhost:50051 # No default (required)
     service: helloworld.Greeter # No default (required)
     method: SayHello # No default (required)
+    reflection: false
+    proto_files: []
+    health_check: {}
     max_in_flight: 64
     batching:
       count: 0
@@ -56,7 +59,12 @@ output:
     address: localhost:50051 # No default (required)
     service: helloworld.Greeter # No default (required)
     method: SayHello # No default (required)
+    reflection: false
+    proto_files: []
     propagate_response: false
+    health_check:
+      enabled: false
+      service_name: ""
     tls:
       enabled: false
       skip_cert_verify: false
@@ -120,6 +128,22 @@ Type: `string`
 method: SayHello
 ```
 
+### `reflection`
+
+TODO
+
+
+Type: `bool`  
+Default: `false`  
+
+### `proto_files`
+
+TODO
+
+
+Type: `array`  
+Default: `[]`  
+
 ### `propagate_response`
 
 TODO
@@ -127,6 +151,29 @@ TODO
 
 Type: `bool`  
 Default: `false`  
+
+### `health_check`
+
+Sorry! This field is missing documentation.
+
+
+Type: `object`  
+
+### `health_check.enabled`
+
+TODO
+
+
+Type: `bool`  
+Default: `false`  
+
+### `health_check.service_name`
+
+TODO
+
+
+Type: `string`  
+Default: `""`  
 
 ### `tls`
 

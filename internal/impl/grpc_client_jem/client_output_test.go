@@ -1,9 +1,12 @@
 package grpc_client_jem
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,11 +18,15 @@ import (
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/internal/message"
 	"github.com/warpstreamlabs/bento/internal/transaction"
+	"github.com/warpstreamlabs/bento/public/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+
+	_ "github.com/warpstreamlabs/bento/public/components/io"
+	_ "github.com/warpstreamlabs/bento/public/components/pure"
 )
 
 //------------------------------------------------------------------------------
@@ -261,29 +268,6 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 
 	return sendChan, receiveChan, nil
 }
-func TestGrpcClientWriterHealthCheck(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection(), withHealthCheck())
-
-	yamlConf := fmt.Sprintf(`
-address: localhost:%v
-service: helloworld.Greeter
-method: SayHello
-reflection: true
-health_check:
-  enabled: true
-  service_name: ""
-`, testServer.port)
-
-	pConf, err := grcpClientOutputSpec().ParseYAML(yamlConf, nil)
-	require.NoError(t, err)
-
-	foo, err := newGrpcClientWriterFromParsed(pConf, nil)
-	require.NoError(t, err)
-
-	ctx := context.Background()
-	err = foo.Connect(ctx)
-	require.NoError(t, err)
-}
 
 func TestGrpcClientWriterBasicProtoFile(t *testing.T) {
 	testServer := startGRPCServer(t)
@@ -321,4 +305,73 @@ grpc_client_jem:
 	}
 
 	assert.Equal(t, 4, testServer.sayHelloInvocations)
+}
+
+func TestGrpcClientWriterHealthCheck(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection(), withHealthCheck())
+
+	yamlConf := fmt.Sprintf(`
+address: localhost:%v
+service: helloworld.Greeter
+method: SayHello
+reflection: true
+health_check:
+  enabled: true
+  service_name: ""
+`, testServer.port)
+
+	pConf, err := grcpClientOutputSpec().ParseYAML(yamlConf, nil)
+	require.NoError(t, err)
+
+	foo, err := newGrpcClientWriterFromParsed(pConf, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = foo.Connect(ctx)
+	require.NoError(t, err)
+}
+
+func TestGrpcClientWriterUnableToFindMethodErr(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	sb := service.NewStreamBuilder()
+
+	sb.SetYAML(fmt.Sprintf(`
+input:
+  generate:
+    mapping: root.name = "Alice"
+    count: 1
+
+output:
+  grpc_client_jem:
+    address: localhost:%v
+    service: helloworld.Greeter
+    method: DoesNotExist
+    reflection: true
+`, testServer.port))
+
+	originalStdout := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() {
+		os.Stdout = originalStdout
+	}()
+
+	stream, err := sb.Build()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = stream.Run(ctx)
+	require.Equal(t, err, context.DeadlineExceeded)
+
+	var buf bytes.Buffer
+	w.Close()
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+	r.Close()
+
+	assert.Contains(t, buf.String(), "method: DoesNotExist not found")
 }
