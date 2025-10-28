@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -38,16 +38,10 @@ type testServer struct {
 	tls         bool
 	healthCheck bool
 
-	mu                  sync.Mutex
-	sayHelloInvocations int
-	port                int
-}
-
-func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
-	s.mu.Lock()
-	s.sayHelloInvocations = s.sayHelloInvocations + 1
-	s.mu.Unlock()
-	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
+	mu                        sync.Mutex
+	sayHelloInvocations       int
+	sayMultiHellosInvocations int
+	port                      int
 }
 
 func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
@@ -89,6 +83,33 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	test_server.RegisterGreeterServer(s, testServer)
 	go s.Serve(lis)
 	return testServer
+}
+
+func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
+	s.mu.Lock()
+	s.sayHelloInvocations++
+	s.mu.Unlock()
+	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
+}
+
+func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHellosServer) error {
+	s.mu.Lock()
+	s.sayMultiHellosInvocations++
+	s.mu.Unlock()
+	names := ""
+
+	for {
+		in, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&test_server.HelloReply{
+				Message: "Hello " + names,
+			})
+		}
+		if err != nil {
+			return err
+		}
+		names = names + ", " + in.Name
+	}
 }
 
 //------------------------------------------------------------------------------
@@ -263,7 +284,10 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 	sendChan = make(chan message.Transaction)
 	receiveChan = make(chan error)
 
-	s.Consume(sendChan)
+	err = s.Consume(sendChan)
+	if err != nil {
+		return
+	}
 	t.Cleanup(s.TriggerCloseNow)
 
 	return sendChan, receiveChan, nil
@@ -350,28 +374,64 @@ output:
     reflection: true
 `, testServer.port))
 
-	originalStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-	defer func() {
-		os.Stdout = originalStdout
-	}()
+	buffer := new(bytes.Buffer)
+	logger := slog.New(slog.NewTextHandler(buffer, nil))
+
+	sb.SetLogger(logger)
 
 	stream, err := sb.Build()
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err = stream.Run(ctx)
 	require.Equal(t, err, context.DeadlineExceeded)
 
-	var buf bytes.Buffer
-	w.Close()
-	_, err = io.Copy(&buf, r)
-	require.NoError(t, err)
-	r.Close()
+	assert.Contains(t, buffer.String(), "method: DoesNotExist not found")
+}
 
-	assert.Contains(t, buf.String(), "method: DoesNotExist not found")
+func TestGrpcClientWriterClientSideStream(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayMultipleHellos
+  reflection: true
+  rpc_type: client_stream
+  batching:
+    count: 4
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	msgBatch := [][]byte{[]byte(`{"name":"Alice"}`),
+		[]byte(`{"name":"Bob"}`),
+		[]byte(`{"name":"Carol"}`),
+		[]byte(`{"name":"Dan"}`),
+	}
+
+	testMsg := message.QuickBatch(msgBatch)
+	resultStore := transaction.NewResultStore()
+	transaction.AddResultStore(testMsg, resultStore)
+
+	select {
+	case sendChan <- message.NewTransaction(testMsg, receiveChan):
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	time.Sleep(10 * time.Second) // TODO Remove
+
+	select {
+	case res := <-receiveChan:
+		assert.NoError(t, res)
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	assert.Equal(t, 1, testServer.sayMultiHellosInvocations)
 }

@@ -22,6 +22,7 @@ const (
 	grpcClientOutputAddress                = "address"
 	grpcClientOutputService                = "service"
 	grpcClientOutputMethod                 = "method"
+	grpcClientOutputRPCType                = "rpc_type"
 	grpcClientOutputReflection             = "reflection"
 	grpcClientOutputProtoFiles             = "proto_files"
 	grpcClientOutputBatching               = "batching"
@@ -47,6 +48,12 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 			service.NewStringField(grpcClientOutputMethod).
 				Description("TODO").
 				Example("SayHello"),
+			service.NewStringEnumField(
+				grpcClientOutputRPCType,
+				[]string{"unary", "client_stream", "server_stream", "bidi"}...,
+			).
+				Description("TODO").
+				Default("unary"),
 			service.NewBoolField(grpcClientOutputReflection).
 				Description("TODO").
 				Default(false),
@@ -98,6 +105,7 @@ type grpcClientWriter struct {
 	address                string
 	serviceName            string
 	methodName             string
+	rpcType                string
 	reflection             bool
 	protoFiles             []string
 	propResponse           bool
@@ -121,6 +129,10 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		return nil, err
 	}
 	methodName, err := conf.FieldString(grpcClientOutputMethod)
+	if err != nil {
+		return nil, err
+	}
+	rpcType, err := conf.FieldString(grpcClientOutputRPCType)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +167,7 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		address:                address,
 		serviceName:            serviceName,
 		methodName:             methodName,
+		rpcType:                rpcType,
 		reflection:             reflection,
 		protoFiles:             protoFiles,
 		propResponse:           propResponse,
@@ -219,7 +232,6 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 			gcw.method = method
 		} else {
 			return fmt.Errorf("method: %v not found", gcw.methodName)
-			//return service.ErrNotConnected
 		}
 	}
 
@@ -257,6 +269,31 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.MessageBatch) error {
 	if gcw.conn == nil || gcw.method == nil {
 		return service.ErrNotConnected
+	}
+
+	if gcw.rpcType == "client_stream" {
+		clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
+		if err != nil {
+			return err
+		}
+
+		for _, msg := range msgBatch {
+			msgBytes, err := msg.AsBytes()
+			if err != nil {
+				return nil
+			}
+
+			request := dynamic.NewMessage(gcw.method.GetInputType())
+			if err := request.UnmarshalJSON(msgBytes); err != nil {
+				return err
+			}
+
+			err = clientStream.SendMsg(request)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	rc := grpcreflect.NewClientAuto(ctx, gcw.conn)
