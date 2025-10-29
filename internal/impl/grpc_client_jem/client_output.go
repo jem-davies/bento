@@ -272,32 +272,27 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 	}
 
 	if gcw.rpcType == "client_stream" {
-		clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
+		err := gcw.clientStreamHandler(ctx, msgBatch)
 		if err != nil {
 			return err
-		}
-
-		for _, msg := range msgBatch {
-			msgBytes, err := msg.AsBytes()
-			if err != nil {
-				return nil
-			}
-
-			request := dynamic.NewMessage(gcw.method.GetInputType())
-			if err := request.UnmarshalJSON(msgBytes); err != nil {
-				return err
-			}
-
-			err = clientStream.SendMsg(request)
-			if err != nil {
-				return err
-			}
 		}
 		return nil
 	}
 
-	rc := grpcreflect.NewClientAuto(ctx, gcw.conn)
-	defer rc.Reset()
+	err := gcw.unaryHandler(ctx, msgBatch)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
+	return gcw.conn.Close()
+}
+
+//------------------------------------------------------------------------------
+
+func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.MessageBatch) error {
 
 	for _, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
@@ -334,6 +329,48 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 	return nil
 }
 
-func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
-	return gcw.conn.Close()
+func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+
+	clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
+	if err != nil {
+		return err
+	}
+
+	for _, msg := range msgBatch {
+		msgBytes, err := msg.AsBytes()
+		if err != nil {
+			return nil
+		}
+
+		request := dynamic.NewMessage(gcw.method.GetInputType())
+		if err := request.UnmarshalJSON(msgBytes); err != nil {
+			return err
+		}
+
+		err = clientStream.SendMsg(request)
+		if err != nil {
+			return err
+		}
+	}
+	if gcw.propResponse {
+		resProtoMessage, err := clientStream.CloseAndReceive()
+		if err != nil {
+			return err
+		}
+
+		if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
+			jsonBytes, err := dynMsg.MarshalJSON()
+			if err != nil {
+				return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+			}
+
+			responseBatch := msgBatch.Copy()
+			responseBatch[0].SetBytes(jsonBytes)
+
+			if err := responseBatch.AddSyncResponse(); err != nil {
+				return err
+			}
+		}
+	} // TODO: fallback for unexpected undynamic messages...
+	return nil
 }

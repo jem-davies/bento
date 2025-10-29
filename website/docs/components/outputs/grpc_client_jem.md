@@ -36,6 +36,7 @@ output:
     address: localhost:50051 # No default (required)
     service: helloworld.Greeter # No default (required)
     method: SayHello # No default (required)
+    rpc_type: unary
     reflection: false
     proto_files: []
     health_check: {}
@@ -59,6 +60,7 @@ output:
     address: localhost:50051 # No default (required)
     service: helloworld.Greeter # No default (required)
     method: SayHello # No default (required)
+    rpc_type: unary
     reflection: false
     proto_files: []
     propagate_response: false
@@ -127,6 +129,15 @@ Type: `string`
 
 method: SayHello
 ```
+
+### `rpc_type`
+
+TODO
+
+
+Type: `string`  
+Default: `"unary"`  
+Options: `unary`, `client_stream`, `server_stream`, `bidi`.
 
 ### `reflection`
 

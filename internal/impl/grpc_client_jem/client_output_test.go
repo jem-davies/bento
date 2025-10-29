@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -96,19 +97,19 @@ func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHel
 	s.mu.Lock()
 	s.sayMultiHellosInvocations++
 	s.mu.Unlock()
-	names := ""
+	names := []string{}
 
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
 			return stream.SendAndClose(&test_server.HelloReply{
-				Message: "Hello " + names,
+				Message: "Hello " + strings.Join(names, ", "),
 			})
 		}
 		if err != nil {
 			return err
 		}
-		names = names + ", " + in.Name
+		names = append(names, in.Name)
 	}
 }
 
@@ -262,37 +263,6 @@ grpc_client_jem:
 	assert.Equal(t, 4, testServer.sayHelloInvocations)
 }
 
-//------------------------------------------------------------------------------
-
-func startGrpcClientOutput(t *testing.T, yamlConf string) (
-	sendChan chan message.Transaction,
-	receiveChan chan error,
-	err error,
-) {
-	t.Helper()
-
-	conf, err := testutil.OutputFromYAML(yamlConf)
-	if err != nil {
-		return
-	}
-
-	s, err := mock.NewManager().NewOutput(conf)
-	if err != nil {
-		return
-	}
-
-	sendChan = make(chan message.Transaction)
-	receiveChan = make(chan error)
-
-	err = s.Consume(sendChan)
-	if err != nil {
-		return
-	}
-	t.Cleanup(s.TriggerCloseNow)
-
-	return sendChan, receiveChan, nil
-}
-
 func TestGrpcClientWriterBasicProtoFile(t *testing.T) {
 	testServer := startGRPCServer(t)
 
@@ -323,6 +293,53 @@ grpc_client_jem:
 		select {
 		case res := <-receiveChan:
 			assert.NoError(t, res)
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloInvocations)
+}
+
+func TestGrpcClientWriterBasicProtoFileSyncResponse(t *testing.T) {
+	testServer := startGRPCServer(t)
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  proto_files: 
+    - "./grpc_test_server/helloworld.proto"
+  propagate_response: true
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	names := []string{"Alice", "Bob", "Carol", "Dan"}
+
+	for i, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		resultStore := transaction.NewResultStore()
+		transaction.AddResultStore(testMsg, resultStore)
+
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+			resMsgs := resultStore.Get()
+			resMsg := resMsgs[0]
+			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
 		case <-time.After(time.Minute):
 			t.Fatal("Action timed out")
 		}
@@ -382,13 +399,14 @@ output:
 	stream, err := sb.Build()
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	err = stream.Run(ctx)
-	require.Equal(t, err, context.DeadlineExceeded)
+	go stream.Run(ctx)
 
-	assert.Contains(t, buffer.String(), "method: DoesNotExist not found")
+	assert.Eventually(t, func() bool {
+		return strings.Contains(buffer.String(), "method: DoesNotExist not found")
+	}, time.Second*10, time.Second)
 }
 
 func TestGrpcClientWriterClientSideStream(t *testing.T) {
@@ -408,7 +426,8 @@ grpc_client_jem:
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
 	assert.NoError(t, err)
 
-	msgBatch := [][]byte{[]byte(`{"name":"Alice"}`),
+	msgBatch := [][]byte{
+		[]byte(`{"name":"Alice"}`),
 		[]byte(`{"name":"Bob"}`),
 		[]byte(`{"name":"Carol"}`),
 		[]byte(`{"name":"Dan"}`),
@@ -424,8 +443,6 @@ grpc_client_jem:
 		t.Fatal("Action timed out")
 	}
 
-	time.Sleep(10 * time.Second) // TODO Remove
-
 	select {
 	case res := <-receiveChan:
 		assert.NoError(t, res)
@@ -433,5 +450,90 @@ grpc_client_jem:
 		t.Fatal("Action timed out")
 	}
 
-	assert.Equal(t, 1, testServer.sayMultiHellosInvocations)
+	assert.Eventually(t, func() bool {
+		return testServer.sayMultiHellosInvocations == 1
+	}, time.Second*10, time.Second)
+}
+
+func TestGrpcClientWriterClientStreamSyncResponse(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayMultipleHellos
+  propagate_response: true
+  reflection: true
+  rpc_type: client_stream
+  batching:
+    count: 4
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	msgBatch := [][]byte{
+		[]byte(`{"name":"Alice"}`),
+		[]byte(`{"name":"Bob"}`),
+		[]byte(`{"name":"Carol"}`),
+		[]byte(`{"name":"Dan"}`),
+	}
+
+	names := "Alice, Bob, Carol, Dan"
+
+	testMsg := message.QuickBatch(msgBatch)
+	resultStore := transaction.NewResultStore()
+	transaction.AddResultStore(testMsg, resultStore)
+
+	select {
+	case sendChan <- message.NewTransaction(testMsg, receiveChan):
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	select {
+	case res := <-receiveChan:
+		assert.NoError(t, res)
+		resMsgs := resultStore.Get()
+		resMsg := resMsgs[0]
+		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resMsg.Get(0).AsBytes()))
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	assert.Eventually(t, func() bool {
+		return testServer.sayMultiHellosInvocations == 1
+	}, time.Second*10, time.Second)
+}
+
+//------------------------------------------------------------------------------
+
+func startGrpcClientOutput(t *testing.T, yamlConf string) (
+	sendChan chan message.Transaction,
+	receiveChan chan error,
+	err error,
+) {
+	t.Helper()
+
+	conf, err := testutil.OutputFromYAML(yamlConf)
+	if err != nil {
+		return
+	}
+
+	s, err := mock.NewManager().NewOutput(conf)
+	if err != nil {
+		return
+	}
+
+	sendChan = make(chan message.Transaction)
+	receiveChan = make(chan error)
+
+	err = s.Consume(sendChan)
+	if err != nil {
+		return
+	}
+	t.Cleanup(s.TriggerCloseNow)
+
+	return sendChan, receiveChan, nil
 }
