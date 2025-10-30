@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/protoparse"
@@ -347,7 +348,7 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 	for _, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
 		if err != nil {
-			return nil
+			return err
 		}
 
 		request := dynamic.NewMessage(gcw.method.GetInputType())
@@ -401,8 +402,37 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 			return err
 		}
 
-		serverStream.RecvMsg()
-	}
+		i := 0
+		responseBatch := msgBatch.Copy()
 
+		for {
+			resProtoMessage, err := serverStream.RecvMsg()
+			if err == io.EOF {
+				if gcw.propResponse {
+					if err := responseBatch.AddSyncResponse(); err != nil {
+						return err
+					}
+				}
+				break
+			}
+
+			if gcw.propResponse {
+				if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
+					jsonBytes, err := dynMsg.MarshalJSON()
+					if err != nil {
+						return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+					}
+
+					if len(responseBatch)-1 < i { // TODO: propResponse logic / msg copying
+						responseBatch = append(responseBatch, service.NewMessage(jsonBytes))
+					} else {
+						responseBatch[i].SetBytes(jsonBytes)
+					}
+
+				}
+			}
+			i++
+		}
+	}
 	return nil
 }

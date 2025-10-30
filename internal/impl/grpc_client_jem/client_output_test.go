@@ -558,6 +558,53 @@ grpc_client_jem:
 	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
 }
 
+func TestGrpcClientWriterServerStreamSyncResponse(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloHowAreYou
+  reflection: true
+  rpc_type: server_stream
+  propagate_response: true
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	names := []string{"Alice", "Bob", "Carol", "Dan"}
+
+	for i, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		resultStore := transaction.NewResultStore()
+		transaction.AddResultStore(testMsg, resultStore)
+
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+			resMsgs := resultStore.Get()
+			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsgs[0].Get(0).AsBytes()))
+			assert.Equal(t, `{"message":"How are you, `+names[i]+`?"}`, string(resMsgs[0].Get(1).AsBytes()))
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
+}
+
 //------------------------------------------------------------------------------
 
 func startGrpcClientOutput(t *testing.T, yamlConf string) (
