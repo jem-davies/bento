@@ -39,10 +39,11 @@ type testServer struct {
 	tls         bool
 	healthCheck bool
 
-	mu                        sync.Mutex
-	sayHelloInvocations       int
-	sayMultiHellosInvocations int
-	port                      int
+	mu                           sync.Mutex
+	sayHelloInvocations          int
+	sayMultiHellosInvocations    int
+	sayHelloHowAreYouInvocations int
+	port                         int
 }
 
 func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
@@ -111,6 +112,18 @@ func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHel
 		}
 		names = append(names, in.Name)
 	}
+}
+
+func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test_server.Greeter_SayHelloHowAreYouServer) error {
+	s.mu.Lock()
+	s.sayHelloHowAreYouInvocations++
+	s.mu.Unlock()
+
+	helloMsg := &test_server.HelloReply{Message: "Hello " + in.GetName()}
+	stream.Send(helloMsg)
+	howAreYouMsg := &test_server.HelloReply{Message: "How are you, " + in.GetName() + "?"}
+	stream.Send(howAreYouMsg)
+	return nil
 }
 
 //------------------------------------------------------------------------------
@@ -505,6 +518,44 @@ grpc_client_jem:
 	assert.Eventually(t, func() bool {
 		return testServer.sayMultiHellosInvocations == 1
 	}, time.Second*10, time.Second)
+}
+
+func TestGrpcClientWriterServerStream(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloHowAreYou
+  reflection: true
+  rpc_type: server_stream
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	for _, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
 }
 
 //------------------------------------------------------------------------------

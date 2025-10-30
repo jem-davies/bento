@@ -279,6 +279,14 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 		return nil
 	}
 
+	if gcw.rpcType == "server_stream" {
+		err := gcw.serverStreamHandler(ctx, msgBatch)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
 	err := gcw.unaryHandler(ctx, msgBatch)
 	if err != nil {
 		return err
@@ -372,5 +380,29 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 			}
 		}
 	} // TODO: fallback for unexpected undynamic messages...
+	return nil
+}
+
+func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+
+	for _, msg := range msgBatch {
+		msgBytes, err := msg.AsBytes()
+		if err != nil {
+			return err
+		}
+
+		request := dynamic.NewMessage(gcw.method.GetInputType())
+		if err := request.UnmarshalJSON(msgBytes); err != nil {
+			return err
+		}
+
+		serverStream, err := gcw.stub.InvokeRpcServerStream(ctx, gcw.method, request)
+		if err != nil {
+			return err
+		}
+
+		serverStream.RecvMsg()
+	}
+
 	return nil
 }

@@ -22,7 +22,6 @@ package helloworld
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -36,6 +35,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Greeter_SayHello_FullMethodName          = "/helloworld.Greeter/SayHello"
 	Greeter_SayMultipleHellos_FullMethodName = "/helloworld.Greeter/SayMultipleHellos"
+	Greeter_SayHelloHowAreYou_FullMethodName = "/helloworld.Greeter/SayHelloHowAreYou"
 )
 
 // GreeterClient is the client API for Greeter service.
@@ -48,6 +48,8 @@ type GreeterClient interface {
 	SayHello(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloReply, error)
 	// Accepts a stream of HelloRequest and sends a greeting
 	SayMultipleHellos(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[HelloRequest, HelloReply], error)
+	// Accespts a hello request and returns a stream of greetings
+	SayHelloHowAreYou(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[HelloReply], error)
 }
 
 type greeterClient struct {
@@ -81,6 +83,25 @@ func (c *greeterClient) SayMultipleHellos(ctx context.Context, opts ...grpc.Call
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Greeter_SayMultipleHellosClient = grpc.ClientStreamingClient[HelloRequest, HelloReply]
 
+func (c *greeterClient) SayHelloHowAreYou(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[HelloReply], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Greeter_ServiceDesc.Streams[1], Greeter_SayHelloHowAreYou_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[HelloRequest, HelloReply]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Greeter_SayHelloHowAreYouClient = grpc.ServerStreamingClient[HelloReply]
+
 // GreeterServer is the server API for Greeter service.
 // All implementations must embed UnimplementedGreeterServer
 // for forward compatibility.
@@ -91,6 +112,8 @@ type GreeterServer interface {
 	SayHello(context.Context, *HelloRequest) (*HelloReply, error)
 	// Accepts a stream of HelloRequest and sends a greeting
 	SayMultipleHellos(grpc.ClientStreamingServer[HelloRequest, HelloReply]) error
+	// Accespts a hello request and returns a stream of greetings
+	SayHelloHowAreYou(*HelloRequest, grpc.ServerStreamingServer[HelloReply]) error
 	mustEmbedUnimplementedGreeterServer()
 }
 
@@ -106,6 +129,9 @@ func (UnimplementedGreeterServer) SayHello(context.Context, *HelloRequest) (*Hel
 }
 func (UnimplementedGreeterServer) SayMultipleHellos(grpc.ClientStreamingServer[HelloRequest, HelloReply]) error {
 	return status.Errorf(codes.Unimplemented, "method SayMultipleHellos not implemented")
+}
+func (UnimplementedGreeterServer) SayHelloHowAreYou(*HelloRequest, grpc.ServerStreamingServer[HelloReply]) error {
+	return status.Errorf(codes.Unimplemented, "method SayHelloHowAreYou not implemented")
 }
 func (UnimplementedGreeterServer) mustEmbedUnimplementedGreeterServer() {}
 func (UnimplementedGreeterServer) testEmbeddedByValue()                 {}
@@ -153,6 +179,17 @@ func _Greeter_SayMultipleHellos_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Greeter_SayMultipleHellosServer = grpc.ClientStreamingServer[HelloRequest, HelloReply]
 
+func _Greeter_SayHelloHowAreYou_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(HelloRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(GreeterServer).SayHelloHowAreYou(m, &grpc.GenericServerStream[HelloRequest, HelloReply]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Greeter_SayHelloHowAreYouServer = grpc.ServerStreamingServer[HelloReply]
+
 // Greeter_ServiceDesc is the grpc.ServiceDesc for Greeter service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -170,6 +207,11 @@ var Greeter_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "SayMultipleHellos",
 			Handler:       _Greeter_SayMultipleHellos_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "SayHelloHowAreYou",
+			Handler:       _Greeter_SayHelloHowAreYou_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "helloworld.proto",
