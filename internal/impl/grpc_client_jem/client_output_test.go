@@ -3,10 +3,13 @@ package grpc_client_jem
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -63,11 +66,33 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	serverOpts := []grpc.ServerOption{}
 
 	if testServer.tls {
-		creds, err := credentials.NewServerTLSFromFile("./grpc_test_server/server_cert.pem", "./grpc_test_server/server_key.pem")
+		serverCert, err := tls.LoadX509KeyPair(
+			"./grpc_test_server/certs/server.pem",
+			"./grpc_test_server/certs/server.key",
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		caCert, err := os.ReadFile("./grpc_test_server/certs/ca.pem")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(caCert) {
+			t.Fatal("")
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{serverCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    certPool,
+		}
+
+		creds := credentials.NewTLS(tlsConfig)
 		serverOpts = append(serverOpts, grpc.Creds(creds))
+
 	}
 
 	s := grpc.NewServer(serverOpts...)
@@ -243,12 +268,12 @@ grpc_client_jem:
   reflection: true
   tls:
     enabled: true
-    root_cas_file: ./grpc_test_server/client_ca_cert.pem
+    root_cas_file: ./grpc_test_server/certs/ca.pem
     client_certs:
-      - cert_file: ./grpc_test_server/client_cert.pem
-        key_file: ./grpc_test_server/client_key.pem
-    skip_cert_verify: true
-`, testServer.port) // TODO: have skip_cert_verify: false
+      - cert_file: ./grpc_test_server/certs/client.pem
+        key_file: ./grpc_test_server/certs/client.key
+    skip_cert_verify: false
+`, testServer.port)
 
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
 	assert.NoError(t, err)
