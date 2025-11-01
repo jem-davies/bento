@@ -62,12 +62,12 @@ func TestCollect(t *testing.T) {
 			},
 			expResult: []foo{{name: "Alice"}, {name: "Bob"}, {name: "Carol"}, {name: "Dan"}, {name: "Ethan"}, {name: "Frank"}},
 		},
-		// "TestCollectEmptyPages": { // FAILING
-		// 	testData: map[string]page{
-		// 		"page1": {fooList: []foo{}, nextToken: nil},
-		// 	},
-		// 	expResult: []foo{},
-		// },
+		"TestCollectEmptyPages": {
+			testPageMap: map[string]page{
+				"page1": {fooList: []foo{}, nextToken: nil},
+			},
+			expResult: []foo{},
+		},
 		"TestCollectError": {
 			testPageMap: map[string]page{
 				"page1": {fooList: []foo{{name: "Alice"}, {name: "Bob"}}, nextToken: stringPtr("INVALID_TOKEN")},
