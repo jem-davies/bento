@@ -12,9 +12,11 @@ import (
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/warpstreamlabs/bento/public/service"
+	"golang.org/x/oauth2/clientcredentials"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials/oauth"
 	_ "google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
@@ -76,9 +78,62 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 					Advanced(),
 			),
 			service.NewTLSToggledField(grpcClientOutputTls),
+			oAuth2FieldSpec(),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
 		)
+}
+
+// TODO - dedupe from ./internal/httpclient ?
+const (
+	aFieldOAuth2           = "oauth2"
+	ao2FieldEnabled        = "enabled"
+	ao2FieldClientKey      = "client_key"
+	ao2FieldClientSecret   = "client_secret"
+	ao2FieldTokenURL       = "token_url"
+	ao2FieldScopes         = "scopes"
+	ao2FieldEndpointParams = "endpoint_params"
+)
+
+func oAuth2FieldSpec() *service.ConfigField {
+	return service.NewObjectField(aFieldOAuth2,
+		service.NewBoolField(ao2FieldEnabled).
+			Description("Whether to use OAuth version 2 in requests.").
+			Default(false),
+		service.NewStringField(ao2FieldClientKey).
+			Description("A value used to identify the client to the token provider.").
+			Default(""),
+		service.NewStringField(ao2FieldClientSecret).
+			Description("A secret used to establish ownership of the client key.").
+			Default("").Secret(),
+		service.NewURLField(ao2FieldTokenURL).
+			Description("The URL of the token provider.").
+			Default(""),
+		service.NewStringListField(ao2FieldScopes).
+			Description("A list of optional requested permissions.").
+			Default([]any{}).
+			Advanced(),
+		service.NewAnyMapField(ao2FieldEndpointParams).
+			Description("A list of optional endpoint parameters, values should be arrays of strings.").
+			Advanced().
+			Example(map[string]any{
+				"foo": []string{"meow", "quack"},
+				"bar": []string{"woof"},
+			}).
+			Default(map[string]any{}).
+			Optional(),
+	).
+		Description("Allows you to specify open authentication via OAuth version 2 using the client credentials token flow.").
+		Optional().Advanced()
+}
+
+type oauth2Config struct {
+	enabled        bool
+	clientKey      string
+	clientSecret   string
+	tokenURL       string
+	scopes         []string
+	endpointParams map[string][]string
 }
 
 func init() {
@@ -111,6 +166,7 @@ type grpcClientWriter struct {
 	protoFiles             []string
 	propResponse           bool
 	tls                    *tls.Config
+	oauth                  oauth2Config
 	healthCheckEnabled     bool
 	healthCheckServiceName string
 
@@ -164,15 +220,60 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		return nil, err
 	}
 
+	oauthConf := conf.Namespace(aFieldOAuth2)
+
+	enabled, err := oauthConf.FieldBool(ao2FieldEnabled)
+	if err != nil {
+		return nil, err
+	}
+	clientKey, err := oauthConf.FieldString(ao2FieldClientKey)
+	if err != nil {
+		return nil, err
+	}
+	clientSecret, err := oauthConf.FieldString(ao2FieldClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	tokenURL, err := oauthConf.FieldString(ao2FieldTokenURL)
+	if err != nil {
+		return nil, err
+	}
+	scopes, err := oauthConf.FieldStringList(ao2FieldScopes)
+	if err != nil {
+		return nil, err
+	}
+	ep, err := oauthConf.FieldAnyMap(ao2FieldEndpointParams)
+	if err != nil {
+		return nil, err
+	}
+
+	endpointParams := map[string][]string{}
+	for k, v := range ep {
+		if endpointParams[k], err = v.FieldStringList(); err != nil {
+			return nil, err
+		}
+	}
+
+	oauth := oauth2Config{
+		enabled:        enabled,
+		clientKey:      clientKey,
+		clientSecret:   clientSecret,
+		tokenURL:       tokenURL,
+		scopes:         scopes,
+		endpointParams: endpointParams,
+	}
+
 	writer := &grpcClientWriter{
-		address:                address,
-		serviceName:            serviceName,
-		methodName:             methodName,
-		rpcType:                rpcType,
-		reflection:             reflection,
-		protoFiles:             protoFiles,
-		propResponse:           propResponse,
-		tls:                    tls,
+		address:      address,
+		serviceName:  serviceName,
+		methodName:   methodName,
+		rpcType:      rpcType,
+		reflection:   reflection,
+		protoFiles:   protoFiles,
+		propResponse: propResponse,
+		tls:          tls,
+		oauth:        oauth,
+
 		healthCheckEnabled:     healthCheckEnabled,
 		healthCheckServiceName: healthCheckServiceName,
 	}
@@ -194,6 +295,26 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(creds))
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	if gcw.oauth.enabled {
+		oauth2Conf := &clientcredentials.Config{
+			ClientID:       gcw.oauth.clientKey,
+			ClientSecret:   gcw.oauth.clientSecret,
+			TokenURL:       gcw.oauth.tokenURL,
+			Scopes:         gcw.oauth.scopes,
+			EndpointParams: gcw.oauth.endpointParams,
+		}
+
+		tokenSource := oauth2Conf.TokenSource(ctx)
+
+		_, err := tokenSource.Token()
+		if err != nil {
+			return fmt.Errorf("failed to fetch OAuth2 token: %w", err)
+		}
+
+		perRPC := oauth.TokenSource{TokenSource: tokenSource}
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(perRPC))
 	}
 
 	if gcw.healthCheckEnabled {

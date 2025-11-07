@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -24,10 +26,13 @@ import (
 	"github.com/warpstreamlabs/bento/internal/transaction"
 	"github.com/warpstreamlabs/bento/public/service"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
@@ -40,6 +45,7 @@ type testServer struct {
 
 	reflection  bool
 	tls         bool
+	oauth2      bool
 	healthCheck bool
 
 	mu                           sync.Mutex
@@ -92,7 +98,10 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 
 		creds := credentials.NewTLS(tlsConfig)
 		serverOpts = append(serverOpts, grpc.Creds(creds))
+	}
 
+	if testServer.oauth2 {
+		serverOpts = append(serverOpts, grpc.UnaryInterceptor(ensureValidToken))
 	}
 
 	s := grpc.NewServer(serverOpts...)
@@ -111,6 +120,8 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	go s.Serve(lis)
 	return testServer
 }
+
+//------------------------------------------------------------------------------
 
 func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
 	s.mu.Lock()
@@ -153,6 +164,35 @@ func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test
 
 //------------------------------------------------------------------------------
 
+var (
+	errMissingMetadata = status.Errorf(codes.InvalidArgument, "missing metadata")
+	errInvalidToken    = status.Errorf(codes.Unauthenticated, "invalid token")
+)
+
+func valid(authorization []string) bool {
+	if len(authorization) < 1 {
+		return false
+	}
+	token := strings.TrimPrefix(authorization[0], "Bearer ")
+
+	return token == "some-secret-token"
+}
+
+func ensureValidToken(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, errMissingMetadata
+	}
+
+	if !valid(md["authorization"]) {
+		return nil, errInvalidToken
+	}
+
+	return handler(ctx, req)
+}
+
+//------------------------------------------------------------------------------
+
 type testServerOpt func(*testServer)
 
 func withReflection() testServerOpt {
@@ -170,6 +210,12 @@ func withTLS() testServerOpt {
 func withHealthCheck() testServerOpt {
 	return func(ts *testServer) {
 		ts.healthCheck = true
+	}
+}
+
+func withOAuth2() testServerOpt {
+	return func(ts *testServer) {
+		ts.oauth2 = true
 	}
 }
 
@@ -626,8 +672,74 @@ grpc_client_jem:
 			t.Fatal("Action timed out")
 		}
 	}
-
 	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
+}
+
+func TestGrpcClientWriterOAuthTLS(t *testing.T) {
+	tsOAuth2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		username, password, ok := r.BasicAuth()
+		assert.True(t, ok)
+		assert.Equal(t, "fookey", username)
+		assert.Equal(t, "foosecret", password)
+
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "grant_type=client_credentials", string(b))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		resp := `{"access_token":"some-secret-token","token_type":"Bearer","expires_in":3600}`
+		_, _ = w.Write([]byte(resp))
+	}))
+	defer tsOAuth2.Close()
+
+	testServer := startGRPCServer(t, withReflection(), withTLS(), withOAuth2())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  reflection: true
+  oauth2:
+    enabled: true
+    token_url: %v
+    client_key: fookey
+    client_secret: foosecret
+  tls:
+    enabled: true
+    root_cas_file: ./grpc_test_server/certs/ca.pem
+    client_certs:
+      - cert_file: ./grpc_test_server/certs/client.pem
+        key_file: ./grpc_test_server/certs/client.key
+    skip_cert_verify: false
+`, testServer.port, tsOAuth2.URL)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	for _, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 4, testServer.sayHelloInvocations)
 }
 
 //------------------------------------------------------------------------------
