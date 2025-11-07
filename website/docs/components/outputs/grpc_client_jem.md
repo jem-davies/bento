@@ -66,7 +66,7 @@ output:
     propagate_response: false
     health_check:
       enabled: false
-      service_name: ""
+      service: ""
     tls:
       enabled: false
       skip_cert_verify: false
@@ -94,13 +94,59 @@ output:
 </TabItem>
 </Tabs>
 
-TODO
+
+### Expected Message Format 
+
+Either the field `reflection` or `proto_files` must be supplied, which will provide the protobuf schema Bento will use to marshall the Bento message into protobuf.
+
+### Retries 
+
+TODO ...
+
+### Propagating Responses
+
+It's possible to propagate the response(s) from each gRPC method invocation back to the input source by
+setting `propagate_response` to `true`. Only inputs that support [synchronous responses](/docs/guides/sync_responses)
+are able to make use of these propagated responses. Also the  `rpc_type`effects the behavior of what is returned via a sync_response:
+
+- `unary`: The response propagated is a single message.
+- `client_stream`: The response propagated is a single message.
+- `server_stream`: The response propagated is a batch of messages.
+- `bidi`: Any inbound message from the server is discarded.
+
+
+## Examples
+
+<Tabs defaultValue="HTTP <--> gRPC Reverse Proxy" values={[
+{ label: 'HTTP <--> gRPC Reverse Proxy', value: 'HTTP <--> gRPC Reverse Proxy', },
+]}>
+
+<TabItem value="HTTP <--> gRPC Reverse Proxy">
+
+You can use Bento to reverse proxy between a X and gRPC
+
+```yaml
+input:
+  http_server:
+    path: /post
+
+output:
+  grpc_client_jem:
+    address: localhost:51286
+    service: helloworld.Greeter
+    method: SayHello
+    propagate_response: true
+    reflection: true
+```
+
+</TabItem>
+</Tabs>
 
 ## Fields
 
 ### `address`
 
-TODO
+The URI of the gRPC target to connect to.
 
 
 Type: `string`  
@@ -113,7 +159,7 @@ address: localhost:50051
 
 ### `service`
 
-TODO
+The name of the service.
 
 
 Type: `string`  
@@ -126,7 +172,7 @@ service: helloworld.Greeter
 
 ### `method`
 
-TODO
+The name of the method to invoke
 
 
 Type: `string`  
@@ -139,7 +185,7 @@ method: SayHello
 
 ### `rpc_type`
 
-TODO
+The type of the rpc method.
 
 
 Type: `string`  
@@ -148,7 +194,7 @@ Options: `unary`, `client_stream`, `server_stream`, `bidi`.
 
 ### `reflection`
 
-TODO
+If set to true, Bento will aquire the protobuf schema for the method from the server via [gRPC Reflection](https://grpc.io/docs/guides/reflection/).
 
 
 Type: `bool`  
@@ -156,15 +202,22 @@ Default: `false`
 
 ### `proto_files`
 
-TODO
+A list of filepaths of .proto files that should contain the schemas necessary for the gRPC method.
 
 
 Type: `array`  
 Default: `[]`  
 
+```yml
+# Examples
+
+proto_files:
+  - ./grpc_test_server/helloworld.proto
+```
+
 ### `propagate_response`
 
-TODO
+Whether responses from the server should be [propagated back](/docs/guides/sync_responses) to the input.
 
 
 Type: `bool`  
@@ -179,15 +232,15 @@ Type: `object`
 
 ### `health_check.enabled`
 
-TODO
+Whether Bento should healthcheck the unary `Check` rpc endpoint on init connection: [gRPC Health Checking](https://grpc.io/docs/guides/health-checking/)
 
 
 Type: `bool`  
 Default: `false`  
 
-### `health_check.service_name`
+### `health_check.service`
 
-TODO
+The name of the service to healthcheck, note that the default value of "", will attempt to check the health of the whole server
 
 
 Type: `string`  

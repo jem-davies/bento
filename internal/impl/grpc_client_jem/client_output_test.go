@@ -64,7 +64,7 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 		o(testServer)
 	}
 
-	lis, err := net.Listen("tcp", ":0")
+	lis, err := net.Listen("tcp", "localhost:0")
 	assert.NoError(t, err)
 
 	testServer.port = lis.Addr().(*net.TCPAddr).Port
@@ -442,7 +442,7 @@ method: SayHello
 reflection: true
 health_check:
   enabled: true
-  service_name: ""
+  service: ""
 `, testServer.port)
 
 	pConf, err := grcpClientOutputSpec().ParseYAML(yamlConf, nil)

@@ -33,47 +33,83 @@ const (
 	grpcClientOutputTls                    = "tls"
 	grpcClientOutputHealthCheck            = "health_check"
 	grpcClientOutputHealthCheckToggle      = "enabled"
-	grpcClientOutputHealthCheckServiceName = "service_name"
+	grpcClientOutputHealthCheckServiceName = "service"
 )
+
+const grpcClientOutputDescription = `
+
+### Expected Message Format 
+
+Either the field ` + "`reflection` or `proto_files`" + ` must be supplied, which will provide the protobuf schema Bento will use to marshall the Bento message into protobuf.
+
+### Retries 
+
+TODO ...
+
+### Propagating Responses
+
+It's possible to propagate the response(s) from each gRPC method invocation back to the input source by
+setting ` + "`" + `propagate_response` + "` to `true`." + ` Only inputs that support [synchronous responses](/docs/guides/sync_responses)
+are able to make use of these propagated responses. Also the  ` + "`" + `rpc_type` + "`" + `effects the behavior of what is returned via a sync_response:
+
+- ` + "`" + `unary` + "`" + `: The response propagated is a single message.` + `
+- ` + "`" + `client_stream` + "`" + `: The response propagated is a single message.` + `
+- ` + "`" + `server_stream` + "`" + `: The response propagated is a batch of messages.` + `
+- ` + "`" + `bidi` + "`" + `: Any inbound message from the server is discarded.` + `
+`
 
 func grcpClientOutputSpec() *service.ConfigSpec {
 	return service.NewConfigSpec().
 		Summary("Sends messages to a GRPC server.").
-		Description("TODO").
+		Description(grpcClientOutputDescription).
 		Categories("network").
+		Example("HTTP <--> gRPC Reverse Proxy", "You can use Bento to reverse proxy between a X and gRPC", `
+input:
+  http_server:
+    path: /post
+
+output:
+  grpc_client_jem:
+    address: localhost:51286
+    service: helloworld.Greeter
+    method: SayHello
+    propagate_response: true
+    reflection: true
+`).
 		Fields(
 			service.NewStringField(grpcClientOutputAddress).
-				Description("TODO").
+				Description("The URI of the gRPC target to connect to.").
 				Example("localhost:50051"),
 			service.NewStringField(grpcClientOutputService).
-				Description("TODO").
+				Description("The name of the service.").
 				Example("helloworld.Greeter"),
 			service.NewStringField(grpcClientOutputMethod).
-				Description("TODO").
+				Description("The name of the method to invoke").
 				Example("SayHello"),
 			service.NewStringEnumField(
 				grpcClientOutputRPCType,
 				[]string{"unary", "client_stream", "server_stream", "bidi"}...,
 			).
-				Description("TODO").
+				Description("The type of the rpc method.").
 				Default("unary"),
 			service.NewBoolField(grpcClientOutputReflection).
-				Description("TODO").
+				Description("If set to true, Bento will aquire the protobuf schema for the method from the server via [gRPC Reflection](https://grpc.io/docs/guides/reflection/).").
 				Default(false),
 			service.NewStringListField(grpcClientOutputProtoFiles).
-				Description("TODO").
+				Description("A list of filepaths of .proto files that should contain the schemas necessary for the gRPC method.").
+				Example([]string{"./grpc_test_server/helloworld.proto"}).
 				Default([]string{}),
 			service.NewBoolField(grpcClientOutputPropRes).
-				Description("TODO").
+				Description("Whether responses from the server should be [propagated back](/docs/guides/sync_responses) to the input.").
 				Default(false).
 				Advanced(),
 			service.NewObjectField(grpcClientOutputHealthCheck,
 				service.NewBoolField(grpcClientOutputHealthCheckToggle).
-					Description("TODO").
+					Description("Whether Bento should healthcheck the unary `Check` rpc endpoint on init connection: [gRPC Health Checking](https://grpc.io/docs/guides/health-checking/)").
 					Default(false).
 					Advanced(),
 				service.NewStringField(grpcClientOutputHealthCheckServiceName).
-					Description("TODO").
+					Description("The name of the service to healthcheck, note that the default value of \"\", will attempt to check the health of the whole server").
 					Default("").
 					Advanced(),
 			),
