@@ -1,0 +1,22 @@
+input:
+  stdin: {}
+
+pipeline:
+  processors: 
+      - python:
+          dependencies:
+            - numpy
+          script: |
+              import numpy as np
+              output_message = (np.array(input_message["a"]) * np.array(input_message["b"])).tolist()
+
+output:
+  stdout: {}
+
+# with @ operator (matrix multiply)
+
+# {"a": [[1, 2], [3, 4]], "b": [[5, 6], [7,8]]}
+# {"data":[[19,22],[43,50]]}
+
+# with * operator (matric cross product)
+# {"data":[[5,12],[21,32]]}
