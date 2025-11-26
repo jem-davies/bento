@@ -52,6 +52,7 @@ type testServer struct {
 	sayHelloInvocations          int
 	sayMultiHellosInvocations    int
 	sayHelloHowAreYouInvocations int
+	sayHelloBidiInvocations      int
 	port                         int
 }
 
@@ -159,6 +160,14 @@ func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test
 	stream.Send(helloMsg)
 	howAreYouMsg := &test_server.HelloReply{Message: "How are you, " + in.GetName() + "?"}
 	stream.Send(howAreYouMsg)
+	return nil
+}
+
+func (s *testServer) SayHelloBidi(grpc.BidiStreamingServer[test_server.HelloRequest, test_server.HelloReply]) error {
+	s.mu.Lock()
+	s.sayHelloBidiInvocations++
+	s.mu.Unlock()
+
 	return nil
 }
 
@@ -673,6 +682,44 @@ grpc_client_jem:
 		}
 	}
 	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
+}
+
+func TestGrpcClientWriterBidirectional(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloBidi
+  reflection: true
+  rpc_type: bidirectional
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	assert.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	for _, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+
+	assert.Equal(t, 1, testServer.sayHelloBidiInvocations)
 }
 
 func TestGrpcClientWriterOAuthTLS(t *testing.T) {

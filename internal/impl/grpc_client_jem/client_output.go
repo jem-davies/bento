@@ -401,7 +401,6 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 			return err
 		}
 
-		// TODO - check this
 	Found:
 		for _, fileDescriptor := range fileDescriptors {
 			for _, service := range fileDescriptor.GetServices() {
@@ -439,6 +438,14 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 
 	if gcw.rpcType == "server_stream" {
 		err := gcw.serverStreamHandler(ctx, msgBatch)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if gcw.rpcType == "bidirectional" {
+		err := gcw.bidirectionalHandler(ctx, msgBatch)
 		if err != nil {
 			return err
 		}
@@ -589,6 +596,31 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 				}
 			}
 			i++
+		}
+	}
+	return nil
+}
+
+func (gcw *grpcClientWriter) bidirectionalHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+	bidi, err := gcw.stub.InvokeRpcBidiStream(ctx, gcw.method)
+	if err != nil {
+		return err
+	}
+
+	for _, msg := range msgBatch {
+		msgBytes, err := msg.AsBytes()
+		if err != nil {
+			return err
+		}
+
+		request := dynamic.NewMessage(gcw.method.GetInputType())
+		if err := request.UnmarshalJSON(msgBytes); err != nil {
+			return err
+		}
+
+		err = bidi.SendMsg(request)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
