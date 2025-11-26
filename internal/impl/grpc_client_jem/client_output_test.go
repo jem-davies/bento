@@ -24,7 +24,6 @@ import (
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/internal/message"
 	"github.com/warpstreamlabs/bento/internal/transaction"
-	"github.com/warpstreamlabs/bento/public/service"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -36,6 +35,7 @@ import (
 
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
+	"github.com/warpstreamlabs/bento/public/service"
 )
 
 //------------------------------------------------------------------------------
@@ -48,11 +48,13 @@ type testServer struct {
 	oauth2      bool
 	healthCheck bool
 
+	oauthAddress string
+
 	mu                           sync.Mutex
-	sayHelloInvocations          int
-	sayMultiHellosInvocations    int
-	sayHelloHowAreYouInvocations int
-	sayHelloBidiInvocations      int
+	SayHelloInvocations          int
+	SayMultiHellosInvocations    int
+	SayHelloHowAreYouInvocations int
+	SayHelloBidiInvocations      int
 	port                         int
 }
 
@@ -102,6 +104,24 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 	}
 
 	if testServer.oauth2 {
+		tsOAuth2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+			username, password, ok := r.BasicAuth()
+			require.True(t, ok)
+			require.Equal(t, "fookey", username)
+			require.Equal(t, "foosecret", password)
+
+			b, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "grant_type=client_credentials", string(b))
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			resp := `{"access_token":"some-secret-token","token_type":"Bearer","expires_in":3600}`
+			_, _ = w.Write([]byte(resp))
+		}))
+
+		testServer.oauthAddress = tsOAuth2.URL
 		serverOpts = append(serverOpts, grpc.UnaryInterceptor(ensureValidToken))
 	}
 
@@ -126,14 +146,14 @@ func startGRPCServer(t *testing.T, opts ...testServerOpt) *testServer {
 
 func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
 	s.mu.Lock()
-	s.sayHelloInvocations++
+	s.SayHelloInvocations++
 	s.mu.Unlock()
 	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
 }
 
 func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHellosServer) error {
 	s.mu.Lock()
-	s.sayMultiHellosInvocations++
+	s.SayMultiHellosInvocations++
 	s.mu.Unlock()
 	names := []string{}
 
@@ -153,7 +173,7 @@ func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHel
 
 func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test_server.Greeter_SayHelloHowAreYouServer) error {
 	s.mu.Lock()
-	s.sayHelloHowAreYouInvocations++
+	s.SayHelloHowAreYouInvocations++
 	s.mu.Unlock()
 
 	helloMsg := &test_server.HelloReply{Message: "Hello " + in.GetName()}
@@ -165,7 +185,7 @@ func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test
 
 func (s *testServer) SayHelloBidi(grpc.BidiStreamingServer[test_server.HelloRequest, test_server.HelloReply]) error {
 	s.mu.Lock()
-	s.sayHelloBidiInvocations++
+	s.SayHelloBidiInvocations++
 	s.mu.Unlock()
 
 	return nil
@@ -230,41 +250,243 @@ func withOAuth2() testServerOpt {
 
 //------------------------------------------------------------------------------
 
-func TestGrpcClientWriterBasicReflection(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
+var namesInputTestData = []string{`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`}
 
-	yamlConf := fmt.Sprintf(`
+func TestGrpcClientWriter(t *testing.T) {
+	tests := map[string]struct {
+		grpcServerOpts   []testServerOpt
+		confFormatString string
+		formatArgs       func(*testServer) []any
+		invocations      func(*testServer) int
+		expInvocations   int
+	}{
+		"Unary Reflection": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
 grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
   reflection: true
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+		},
+		"Unary Proto File": {
+			grpcServerOpts: []testServerOpt{},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  proto_files: 
+    - "./grpc_test_server/helloworld.proto"
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+		},
+		"Client Stream Reflection": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayMultipleHellos
+  reflection: true
+  rpc_type: client_stream
+  batching:
+    count: 4
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayMultiHellosInvocations
+			},
+			expInvocations: 1,
+		},
+		"Server Stream Reflection": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloHowAreYou
+  reflection: true
+  rpc_type: server_stream
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloHowAreYouInvocations
+			},
+			expInvocations: 4,
+		},
+		"Bidirectional Reflection": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloBidi
+  reflection: true
+  rpc_type: bidirectional
+  batching:
+    count: 4
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloBidiInvocations
+			},
+			expInvocations: 1,
+		},
+		"TLS": {
+			grpcServerOpts: []testServerOpt{withReflection(), withTLS()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  reflection: true
+  tls:
+    enabled: true
+    root_cas_file: ./grpc_test_server/certs/ca.pem
+    client_certs:
+      - cert_file: ./grpc_test_server/certs/client.pem
+        key_file: ./grpc_test_server/certs/client.key
+    skip_cert_verify: false
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+		},
+		"TLS and oAuth2": {
+			grpcServerOpts: []testServerOpt{withReflection(), withTLS(), withOAuth2()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  reflection: true
+  oauth2:
+    enabled: true
+    token_url: %v
+    client_key: fookey
+    client_secret: foosecret
+  tls:
+    enabled: true
+    root_cas_file: ./grpc_test_server/certs/ca.pem
+    client_certs:
+      - cert_file: ./grpc_test_server/certs/client.pem
+        key_file: ./grpc_test_server/certs/client.key
+    skip_cert_verify: false
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port, ts.oauthAddress}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+		},
 	}
 
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
+			testServer := startGRPCServer(t, test.grpcServerOpts...)
+
+			yamlConf := fmt.Sprintf(test.confFormatString, test.formatArgs(testServer)...)
+
+			sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+			require.NoError(t, err)
+
+			for _, input := range namesInputTestData {
+				testMsg := message.QuickBatch([][]byte{[]byte(input)})
+				select {
+				case sendChan <- message.NewTransaction(testMsg, receiveChan):
+				case <-time.After(time.Second * 20):
+					t.Fatal("Send timed out")
+				}
+			}
+
+			for i := range namesInputTestData {
+				select {
+				case err := <-receiveChan:
+					require.NoError(t, err)
+				case <-time.After(time.Second * 20):
+					t.Fatalf("Response %d timed out", i)
+				}
+			}
+
+			assert.Eventually(t, func() bool {
+				return test.expInvocations == test.invocations(testServer)
+			}, time.Second*10, time.Millisecond*20)
+		})
+	}
+}
+
+//------------------------------------------------------------------------------
+
+func startGrpcClientOutput(t *testing.T, yamlConf string) (
+	sendChan chan message.Transaction,
+	receiveChan chan error,
+	err error,
+) {
+	t.Helper()
+
+	conf, err := testutil.OutputFromYAML(yamlConf)
+	if err != nil {
+		return
 	}
 
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
+	s, err := mock.NewManager().NewOutput(conf)
+	if err != nil {
+		return
+	}
+
+	sendChan = make(chan message.Transaction)
+	receiveChan = make(chan error)
+
+	err = s.Consume(sendChan)
+	if err != nil {
+		return
+	}
+	t.Cleanup(s.TriggerCloseNow)
+
+	return sendChan, receiveChan, nil
 }
 
 func TestGrpcClientWriterSyncResponseReflection(t *testing.T) {
@@ -280,7 +502,7 @@ grpc_client_jem:
 `, testServer.port)
 
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	inputs := []string{
 		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
@@ -309,89 +531,7 @@ grpc_client_jem:
 		}
 	}
 
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
-}
-
-func TestGrpcClientWriterTLS(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection(), withTLS())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHello
-  reflection: true
-  tls:
-    enabled: true
-    root_cas_file: ./grpc_test_server/certs/ca.pem
-    client_certs:
-      - cert_file: ./grpc_test_server/certs/client.pem
-        key_file: ./grpc_test_server/certs/client.key
-    skip_cert_verify: false
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
-}
-
-func TestGrpcClientWriterBasicProtoFile(t *testing.T) {
-	testServer := startGRPCServer(t)
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHello
-  proto_files: 
-    - "./grpc_test_server/helloworld.proto"
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
+	assert.Equal(t, 4, testServer.SayHelloInvocations)
 }
 
 func TestGrpcClientWriterBasicProtoFileSyncResponse(t *testing.T) {
@@ -402,13 +542,13 @@ grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
-  proto_files: 
+  proto_files:
     - "./grpc_test_server/helloworld.proto"
   propagate_response: true
 `, testServer.port)
 
 	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	inputs := []string{
 		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
@@ -438,7 +578,105 @@ grpc_client_jem:
 		}
 	}
 
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
+	assert.Equal(t, 4, testServer.SayHelloInvocations)
+}
+
+func TestGrpcClientWriterClientStreamSyncResponse(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayMultipleHellos
+  propagate_response: true
+  reflection: true
+  rpc_type: client_stream
+  batching:
+    count: 4
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	require.NoError(t, err)
+
+	msgBatch := [][]byte{
+		[]byte(`{"name":"Alice"}`),
+		[]byte(`{"name":"Bob"}`),
+		[]byte(`{"name":"Carol"}`),
+		[]byte(`{"name":"Dan"}`),
+	}
+
+	names := "Alice, Bob, Carol, Dan"
+
+	testMsg := message.QuickBatch(msgBatch)
+	resultStore := transaction.NewResultStore()
+	transaction.AddResultStore(testMsg, resultStore)
+
+	select {
+	case sendChan <- message.NewTransaction(testMsg, receiveChan):
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	select {
+	case res := <-receiveChan:
+		assert.NoError(t, res)
+		resMsgs := resultStore.Get()
+		resMsg := resMsgs[0]
+		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resMsg.Get(0).AsBytes()))
+	case <-time.After(time.Minute):
+		t.Fatal("Action timed out")
+	}
+
+	assert.Eventually(t, func() bool {
+		return testServer.SayMultiHellosInvocations == 1
+	}, time.Second*10, time.Second)
+}
+
+func TestGrpcClientWriterServerStreamSyncResponse(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	yamlConf := fmt.Sprintf(`
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloHowAreYou
+  reflection: true
+  rpc_type: server_stream
+  propagate_response: true
+`, testServer.port)
+
+	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+	require.NoError(t, err)
+
+	inputs := []string{
+		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+	}
+
+	names := []string{"Alice", "Bob", "Carol", "Dan"}
+
+	for i, input := range inputs {
+		testMsg := message.QuickBatch([][]byte{[]byte(input)})
+		resultStore := transaction.NewResultStore()
+		transaction.AddResultStore(testMsg, resultStore)
+
+		select {
+		case sendChan <- message.NewTransaction(testMsg, receiveChan):
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+
+		select {
+		case res := <-receiveChan:
+			assert.NoError(t, res)
+			resMsgs := resultStore.Get()
+			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsgs[0].Get(0).AsBytes()))
+			assert.Equal(t, `{"message":"How are you, `+names[i]+`?"}`, string(resMsgs[0].Get(1).AsBytes()))
+		case <-time.After(time.Minute):
+			t.Fatal("Action timed out")
+		}
+	}
+	assert.Equal(t, 4, testServer.SayHelloHowAreYouInvocations)
 }
 
 func TestGrpcClientWriterHealthCheck(t *testing.T) {
@@ -462,7 +700,7 @@ health_check:
 
 	ctx := context.Background()
 	err = foo.Connect(ctx)
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }
 
 func TestGrpcClientWriterUnableToFindMethodErr(t *testing.T) {
@@ -500,322 +738,4 @@ output:
 	assert.Eventually(t, func() bool {
 		return strings.Contains(buffer.String(), "method: DoesNotExist not found")
 	}, time.Second*10, time.Second)
-}
-
-func TestGrpcClientWriterClientSideStream(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayMultipleHellos
-  reflection: true
-  rpc_type: client_stream
-  batching:
-    count: 4
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	msgBatch := [][]byte{
-		[]byte(`{"name":"Alice"}`),
-		[]byte(`{"name":"Bob"}`),
-		[]byte(`{"name":"Carol"}`),
-		[]byte(`{"name":"Dan"}`),
-	}
-
-	testMsg := message.QuickBatch(msgBatch)
-	resultStore := transaction.NewResultStore()
-	transaction.AddResultStore(testMsg, resultStore)
-
-	select {
-	case sendChan <- message.NewTransaction(testMsg, receiveChan):
-	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
-	}
-
-	select {
-	case res := <-receiveChan:
-		assert.NoError(t, res)
-	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
-	}
-
-	assert.Eventually(t, func() bool {
-		return testServer.sayMultiHellosInvocations == 1
-	}, time.Second*10, time.Second)
-}
-
-func TestGrpcClientWriterClientStreamSyncResponse(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayMultipleHellos
-  propagate_response: true
-  reflection: true
-  rpc_type: client_stream
-  batching:
-    count: 4
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	msgBatch := [][]byte{
-		[]byte(`{"name":"Alice"}`),
-		[]byte(`{"name":"Bob"}`),
-		[]byte(`{"name":"Carol"}`),
-		[]byte(`{"name":"Dan"}`),
-	}
-
-	names := "Alice, Bob, Carol, Dan"
-
-	testMsg := message.QuickBatch(msgBatch)
-	resultStore := transaction.NewResultStore()
-	transaction.AddResultStore(testMsg, resultStore)
-
-	select {
-	case sendChan <- message.NewTransaction(testMsg, receiveChan):
-	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
-	}
-
-	select {
-	case res := <-receiveChan:
-		assert.NoError(t, res)
-		resMsgs := resultStore.Get()
-		resMsg := resMsgs[0]
-		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resMsg.Get(0).AsBytes()))
-	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
-	}
-
-	assert.Eventually(t, func() bool {
-		return testServer.sayMultiHellosInvocations == 1
-	}, time.Second*10, time.Second)
-}
-
-func TestGrpcClientWriterServerStream(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHelloHowAreYou
-  reflection: true
-  rpc_type: server_stream
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
-}
-
-func TestGrpcClientWriterServerStreamSyncResponse(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHelloHowAreYou
-  reflection: true
-  rpc_type: server_stream
-  propagate_response: true
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	names := []string{"Alice", "Bob", "Carol", "Dan"}
-
-	for i, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		resultStore := transaction.NewResultStore()
-		transaction.AddResultStore(testMsg, resultStore)
-
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-			resMsgs := resultStore.Get()
-			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsgs[0].Get(0).AsBytes()))
-			assert.Equal(t, `{"message":"How are you, `+names[i]+`?"}`, string(resMsgs[0].Get(1).AsBytes()))
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-	assert.Equal(t, 4, testServer.sayHelloHowAreYouInvocations)
-}
-
-func TestGrpcClientWriterBidirectional(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHelloBidi
-  reflection: true
-  rpc_type: bidirectional
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 1, testServer.sayHelloBidiInvocations)
-}
-
-func TestGrpcClientWriterOAuthTLS(t *testing.T) {
-	tsOAuth2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-		username, password, ok := r.BasicAuth()
-		assert.True(t, ok)
-		assert.Equal(t, "fookey", username)
-		assert.Equal(t, "foosecret", password)
-
-		b, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		assert.Equal(t, "grant_type=client_credentials", string(b))
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		resp := `{"access_token":"some-secret-token","token_type":"Bearer","expires_in":3600}`
-		_, _ = w.Write([]byte(resp))
-	}))
-	defer tsOAuth2.Close()
-
-	testServer := startGRPCServer(t, withReflection(), withTLS(), withOAuth2())
-
-	yamlConf := fmt.Sprintf(`
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHello
-  reflection: true
-  oauth2:
-    enabled: true
-    token_url: %v
-    client_key: fookey
-    client_secret: foosecret
-  tls:
-    enabled: true
-    root_cas_file: ./grpc_test_server/certs/ca.pem
-    client_certs:
-      - cert_file: ./grpc_test_server/certs/client.pem
-        key_file: ./grpc_test_server/certs/client.key
-    skip_cert_verify: false
-`, testServer.port, tsOAuth2.URL)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	assert.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-
-	for _, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 4, testServer.sayHelloInvocations)
-}
-
-//------------------------------------------------------------------------------
-
-func startGrpcClientOutput(t *testing.T, yamlConf string) (
-	sendChan chan message.Transaction,
-	receiveChan chan error,
-	err error,
-) {
-	t.Helper()
-
-	conf, err := testutil.OutputFromYAML(yamlConf)
-	if err != nil {
-		return
-	}
-
-	s, err := mock.NewManager().NewOutput(conf)
-	if err != nil {
-		return
-	}
-
-	sendChan = make(chan message.Transaction)
-	receiveChan = make(chan error)
-
-	err = s.Consume(sendChan)
-	if err != nil {
-		return
-	}
-	t.Cleanup(s.TriggerCloseNow)
-
-	return sendChan, receiveChan, nil
 }
