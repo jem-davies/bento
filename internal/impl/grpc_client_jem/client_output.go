@@ -59,10 +59,10 @@ It's possible to propagate the response(s) from each gRPC method invocation back
 setting ` + "`" + `propagate_response` + "` to `true`." + ` Only inputs that support [synchronous responses](/docs/guides/sync_responses)
 are able to make use of these propagated responses. Also the  ` + "`" + `rpc_type` + "`" + `effects the behavior of what is returned via a sync_response:
 
-- ` + "`" + `unary` + "`" + `: The response propagated is a single message.` + `
-- ` + "`" + `client_stream` + "`" + `: The response propagated is a single message.` + `
-- ` + "`" + `server_stream` + "`" + `: The response propagated is a batch of messages.` + `
-- ` + "`" + `bidi` + "`" + `: Any inbound message from the server is discarded.` + `
+- ` + "`" + rpcTypeUnary + "`" + `: The response propagated is a single message.` + `
+- ` + "`" + rpcTypeClientStream + "`" + `: The response propagated is a single message.` + `
+- ` + "`" + rpcTypeServerStream + "`" + `: The response propagated is a batch of messages.` + `
+- ` + "`" + rpcTypeBidi + "`" + `: Any inbound message from the server is discarded.` + `
 `
 
 func grcpClientOutputSpec() *service.ConfigSpec {
@@ -70,7 +70,7 @@ func grcpClientOutputSpec() *service.ConfigSpec {
 		Summary("Sends messages to a GRPC server.").
 		Description(grpcClientOutputDescription).
 		Categories("network").
-		Example("HTTP <--> gRPC Reverse Proxy", "You can use Bento to reverse proxy between a X and gRPC", `
+		Example("HTTP <--> gRPC Reverse Proxy", "Use Bento as a reverse proxy to translate HTTP requests into gRPC calls and return the response", `
 input:
   http_server:
     path: /post
@@ -131,7 +131,7 @@ output:
 	)
 }
 
-// TODO - dedupe from ./internal/httpclient ?
+// TODO - dedupe from ./internal/httpclient
 const (
 	aFieldOAuth2           = "oauth2"
 	ao2FieldEnabled        = "enabled"
@@ -439,34 +439,21 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 		return service.ErrNotConnected
 	}
 
-	if gcw.rpcType == "client_stream" {
-		err := gcw.clientStreamHandler(ctx, msgBatch)
-		if err != nil {
-			return err
-		}
-		return nil
+	var err error
+	switch gcw.rpcType {
+	case rpcTypeUnary:
+		err = gcw.unaryHandler(ctx, msgBatch)
+	case rpcTypeClientStream:
+		err = gcw.clientStreamHandler(ctx, msgBatch)
+	case rpcTypeServerStream:
+		err = gcw.serverStreamHandler(ctx, msgBatch)
+	case rpcTypeBidi:
+		err = gcw.bidirectionalHandler(ctx, msgBatch)
 	}
-
-	if gcw.rpcType == "server_stream" {
-		err := gcw.serverStreamHandler(ctx, msgBatch)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if gcw.rpcType == "bidirectional" {
-		err := gcw.bidirectionalHandler(ctx, msgBatch)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	err := gcw.unaryHandler(ctx, msgBatch)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 

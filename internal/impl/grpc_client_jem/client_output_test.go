@@ -350,7 +350,7 @@ grpc_client_jem:
   service: helloworld.Greeter
   method: SayHelloBidi
   reflection: true
-  rpc_type: bidirectional
+  rpc_type: bidi
   batching:
     count: 4
 `,
