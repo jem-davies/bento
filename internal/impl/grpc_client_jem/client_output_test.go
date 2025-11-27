@@ -706,6 +706,79 @@ output:
 	}, time.Second*10, time.Second)
 }
 
+func TestGrpcClientWriterLints(t *testing.T) {
+
+	tests := map[string]struct {
+		config          string
+		expErrMessage   string
+		noErrorExpected bool
+	}{"Bidi and Propagate Response Lint Check": {
+		config: `
+grpc_client_jem:
+  address: localhost:55001
+  service: helloworld.Greeter
+  method: Foo
+  rpc_type: bidi
+  propagate_response: true
+`,
+		expErrMessage: "cannot set propagate_response to true when rpc_type is bidi",
+	},
+		"Reflection or Proto Files Required": {
+			config: `
+grpc_client_jem:
+  address: localhost:55001
+  service: helloworld.Greeter
+  method: Foo
+  reflection: false
+  proto_files: []
+`,
+			expErrMessage: "reflection must be true or proto_files must be populated",
+		},
+		"Reflection or Proto Files Required Default": {
+			config: `
+grpc_client_jem:
+  address: localhost:55001
+  service: helloworld.Greeter
+  method: Foo
+`,
+			expErrMessage: "reflection must be true or proto_files must be populated",
+		},
+		"Reflection or Proto Files Required Proto Files": {
+			config: `
+grpc_client_jem:
+  address: localhost:55001
+  service: helloworld.Greeter
+  method: Foo
+  proto_files: ["./grpc_test_server/helloworld.proto"]
+`,
+			noErrorExpected: true,
+		},
+		"Reflection or Proto Files Required Reflection": {
+			config: `
+grpc_client_jem:
+  address: localhost:55001
+  service: helloworld.Greeter
+  method: Foo
+  reflection: true
+`,
+			noErrorExpected: true,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := service.NewStreamBuilder().AddOutputYAML(test.config)
+			if test.noErrorExpected {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, test.expErrMessage)
+			}
+		})
+	}
+}
+
 //------------------------------------------------------------------------------
 
 func startGrpcClientOutput(t *testing.T, yamlConf string) (

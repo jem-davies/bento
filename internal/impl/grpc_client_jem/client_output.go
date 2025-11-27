@@ -36,6 +36,13 @@ const (
 	grpcClientOutputHealthCheckServiceName = "service"
 )
 
+const (
+	rpcTypeUnary        = "unary"
+	rpcTypeClientStream = "client_stream"
+	rpcTypeServerStream = "server_stream"
+	rpcTypeBidi         = "bidi"
+)
+
 const grpcClientOutputDescription = `
 
 ### Expected Message Format 
@@ -88,7 +95,7 @@ output:
 				Example("SayHello"),
 			service.NewStringEnumField(
 				grpcClientOutputRPCType,
-				[]string{"unary", "client_stream", "server_stream", "bidi"}...,
+				[]string{rpcTypeUnary, rpcTypeClientStream, rpcTypeServerStream, rpcTypeBidi}...,
 			).
 				Description("The type of the rpc method.").
 				Default("unary"),
@@ -97,8 +104,7 @@ output:
 				Default(false),
 			service.NewStringListField(grpcClientOutputProtoFiles).
 				Description("A list of filepaths of .proto files that should contain the schemas necessary for the gRPC method.").
-				Example([]string{"./grpc_test_server/helloworld.proto"}).
-				Default([]string{}),
+				Example([]string{"./grpc_test_server/helloworld.proto"}),
 			service.NewBoolField(grpcClientOutputPropRes).
 				Description("Whether responses from the server should be [propagated back](/docs/guides/sync_responses) to the input.").
 				Default(false).
@@ -117,7 +123,12 @@ output:
 			oAuth2FieldSpec(),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
-		)
+		).LintRule(
+		`root = match { 
+  this.rpc_type == "bidi" && this.propagate_response == true => "cannot set propagate_response to true when rpc_type is bidi",
+  this.reflection == false && (!this.exists("proto_files") || this.proto_files.length() == 0) => "reflection must be true or proto_files must be populated"
+}`,
+	)
 }
 
 // TODO - dedupe from ./internal/httpclient ?
@@ -592,7 +603,6 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 					} else {
 						responseBatch[i].SetBytes(jsonBytes)
 					}
-
 				}
 			}
 			i++
