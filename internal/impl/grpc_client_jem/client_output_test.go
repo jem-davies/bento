@@ -251,6 +251,7 @@ func withOAuth2() testServerOpt {
 //------------------------------------------------------------------------------
 
 var namesInputTestData = []string{`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`}
+var names = []string{"Alice", "Bob", "Carol", "Dan"}
 
 func TestGrpcClientWriter(t *testing.T) {
 	tests := map[string]struct {
@@ -458,127 +459,92 @@ grpc_client_jem:
 	}
 }
 
-//------------------------------------------------------------------------------
-
-func startGrpcClientOutput(t *testing.T, yamlConf string) (
-	sendChan chan message.Transaction,
-	receiveChan chan error,
-	err error,
-) {
-	t.Helper()
-
-	conf, err := testutil.OutputFromYAML(yamlConf)
-	if err != nil {
-		return
-	}
-
-	s, err := mock.NewManager().NewOutput(conf)
-	if err != nil {
-		return
-	}
-
-	sendChan = make(chan message.Transaction)
-	receiveChan = make(chan error)
-
-	err = s.Consume(sendChan)
-	if err != nil {
-		return
-	}
-	t.Cleanup(s.TriggerCloseNow)
-
-	return sendChan, receiveChan, nil
-}
-
-func TestGrpcClientWriterSyncResponseReflection(t *testing.T) {
-	testServer := startGRPCServer(t, withReflection())
-
-	yamlConf := fmt.Sprintf(`
+func TestGrpcClientWriterSyncResponse(t *testing.T) {
+	tests := map[string]struct {
+		grpcServerOpts   []testServerOpt
+		confFormatString string
+		invocations      func(*testServer) int
+		expInvocations   int
+		inputs           []string
+		waitForBatch     bool
+	}{
+		"Unary Sync Response": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
 grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
   propagate_response: true
   reflection: true
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	require.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
-	}
-	names := []string{"Alice", "Bob", "Carol", "Dan"}
-
-	for i, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		resultStore := transaction.NewResultStore()
-		transaction.AddResultStore(testMsg, resultStore)
-
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-			resMsgs := resultStore.Get()
-			resMsg := resMsgs[0]
-			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
-	}
-
-	assert.Equal(t, 4, testServer.SayHelloInvocations)
-}
-
-func TestGrpcClientWriterBasicProtoFileSyncResponse(t *testing.T) {
-	testServer := startGRPCServer(t)
-
-	yamlConf := fmt.Sprintf(`
+`,
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+			inputs:         namesInputTestData,
+		},
+		"Unary Sync Response Protofile": {
+			grpcServerOpts: []testServerOpt{},
+			confFormatString: `
 grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
   method: SayHello
+  propagate_response: true
   proto_files:
     - "./grpc_test_server/helloworld.proto"
-  propagate_response: true
-`, testServer.port)
-
-	sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-	require.NoError(t, err)
-
-	inputs := []string{
-		`{"name":"Alice"}`, `{"name":"Bob"}`, `{"name":"Carol"}`, `{"name":"Dan"}`,
+`,
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+			expInvocations: 4,
+			inputs:         namesInputTestData,
+		},
 	}
 
-	names := []string{"Alice", "Bob", "Carol", "Dan"}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	for i, input := range inputs {
-		testMsg := message.QuickBatch([][]byte{[]byte(input)})
-		resultStore := transaction.NewResultStore()
-		transaction.AddResultStore(testMsg, resultStore)
+			testServer := startGRPCServer(t, test.grpcServerOpts...)
 
-		select {
-		case sendChan <- message.NewTransaction(testMsg, receiveChan):
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
+			yamlConf := fmt.Sprintf(test.confFormatString, testServer.port)
 
-		select {
-		case res := <-receiveChan:
-			assert.NoError(t, res)
-			resMsgs := resultStore.Get()
-			resMsg := resMsgs[0]
-			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
-		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
-		}
+			sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+			require.NoError(t, err)
+
+			for i, input := range test.inputs {
+				testMsg := message.QuickBatch([][]byte{[]byte(input)})
+				resultStore := transaction.NewResultStore()
+				transaction.AddResultStore(testMsg, resultStore)
+
+				select {
+				case sendChan <- message.NewTransaction(testMsg, receiveChan):
+				case <-time.After(time.Minute):
+					t.Fatal("Action timed out")
+				}
+
+				select {
+				case res := <-receiveChan:
+					assert.NoError(t, res)
+					resMsgs := resultStore.Get()
+					resMsg := resMsgs[0]
+					assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
+				case <-time.After(time.Minute):
+					t.Fatal("Action timed out")
+				}
+			}
+
+			assert.Eventually(t, func() bool {
+				return test.expInvocations == test.invocations(testServer)
+			}, time.Second*10, time.Millisecond*20)
+		})
 	}
-
-	assert.Equal(t, 4, testServer.SayHelloInvocations)
 }
 
 func TestGrpcClientWriterClientStreamSyncResponse(t *testing.T) {
@@ -738,4 +704,35 @@ output:
 	assert.Eventually(t, func() bool {
 		return strings.Contains(buffer.String(), "method: DoesNotExist not found")
 	}, time.Second*10, time.Second)
+}
+
+//------------------------------------------------------------------------------
+
+func startGrpcClientOutput(t *testing.T, yamlConf string) (
+	sendChan chan message.Transaction,
+	receiveChan chan error,
+	err error,
+) {
+	t.Helper()
+
+	conf, err := testutil.OutputFromYAML(yamlConf)
+	if err != nil {
+		return
+	}
+
+	s, err := mock.NewManager().NewOutput(conf)
+	if err != nil {
+		return
+	}
+
+	sendChan = make(chan message.Transaction)
+	receiveChan = make(chan error)
+
+	err = s.Consume(sendChan)
+	if err != nil {
+		return
+	}
+	t.Cleanup(s.TriggerCloseNow)
+
+	return sendChan, receiveChan, nil
 }
