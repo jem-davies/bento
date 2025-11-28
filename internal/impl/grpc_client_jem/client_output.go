@@ -210,6 +210,7 @@ type grpcClientWriter struct {
 	methodName             string
 	rpcType                string
 	reflection             bool
+	reflectClient          *grpcreflect.Client
 	protoFiles             []string
 	propResponse           bool
 	tls                    *tls.Config
@@ -389,10 +390,9 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	}
 
 	if gcw.reflection {
-		reflectClient := grpcreflect.NewClientAuto(ctx, gcw.conn)
-		// defer reflectClient.Reset() // TODO -> move to the gcw.Close()
+		gcw.reflectClient = grpcreflect.NewClientAuto(ctx, gcw.conn)
 
-		serviceDescriptor, err := reflectClient.ResolveService(gcw.serviceName)
+		serviceDescriptor, err := gcw.reflectClient.ResolveService(gcw.serviceName)
 		if err != nil {
 			return err
 		}
@@ -458,14 +458,20 @@ func (gcw *grpcClientWriter) WriteBatch(ctx context.Context, msgBatch service.Me
 }
 
 func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
-	return gcw.conn.Close()
+	if gcw.reflectClient != nil {
+		gcw.reflectClient.Reset()
+	}
+	if gcw.conn != nil {
+		return gcw.conn.Close()
+	}
+	return nil
 }
 
 //------------------------------------------------------------------------------
 
 func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.MessageBatch) error {
 
-	for _, msg := range msgBatch {
+	for _, msg := range msgBatch { // TODO batch aware error handling
 		msgBytes, err := msg.AsBytes()
 		if err != nil {
 			return err
