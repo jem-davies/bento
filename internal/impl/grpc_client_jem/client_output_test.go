@@ -526,7 +526,7 @@ grpc_client_jem:
 				select {
 				case sendChan <- message.NewTransaction(testMsg, receiveChan):
 				case <-time.After(time.Minute):
-					t.Fatal("Action timed out")
+					t.Fatal("send timed out")
 				}
 
 				select {
@@ -536,7 +536,7 @@ grpc_client_jem:
 					resMsg := resMsgs[0]
 					assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsg.Get(0).AsBytes()))
 				case <-time.After(time.Minute):
-					t.Fatal("Action timed out")
+					t.Fatal("receive timed out")
 				}
 			}
 
@@ -581,7 +581,7 @@ grpc_client_jem:
 	select {
 	case sendChan <- message.NewTransaction(testMsg, receiveChan):
 	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
+		t.Fatal("send timed out")
 	}
 
 	select {
@@ -591,7 +591,7 @@ grpc_client_jem:
 		resMsg := resMsgs[0]
 		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resMsg.Get(0).AsBytes()))
 	case <-time.After(time.Minute):
-		t.Fatal("Action timed out")
+		t.Fatal("receive timed out")
 	}
 
 	assert.Eventually(t, func() bool {
@@ -629,7 +629,7 @@ grpc_client_jem:
 		select {
 		case sendChan <- message.NewTransaction(testMsg, receiveChan):
 		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
+			t.Fatal("send timed out")
 		}
 
 		select {
@@ -639,7 +639,7 @@ grpc_client_jem:
 			assert.Equal(t, `{"message":"Hello `+names[i]+`"}`, string(resMsgs[0].Get(0).AsBytes()))
 			assert.Equal(t, `{"message":"How are you, `+names[i]+`?"}`, string(resMsgs[0].Get(1).AsBytes()))
 		case <-time.After(time.Minute):
-			t.Fatal("Action timed out")
+			t.Fatal("receive timed out")
 		}
 	}
 	assert.Equal(t, 4, testServer.SayHelloHowAreYouInvocations)
@@ -703,7 +703,46 @@ output:
 
 	assert.Eventually(t, func() bool {
 		return strings.Contains(buffer.String(), "method: DoesNotExist not found")
-	}, time.Second*10, time.Second)
+	}, time.Second*10, time.Millisecond*20)
+}
+
+func TestGrpcClientWriterBrokenProtoFile(t *testing.T) {
+	testServer := startGRPCServer(t, withReflection())
+
+	sb := service.NewStreamBuilder()
+
+	err := sb.SetYAML(fmt.Sprintf(`
+input:
+  generate:
+    mapping: root.name = "Alice"
+    count: 1
+
+output:
+  grpc_client_jem:
+    address: localhost:%v
+    service: helloworld.Greeter
+    method: SayHello
+    proto_files: 
+      - "./grpc_test_server/fail_parse.proto"
+`, testServer.port))
+	require.NoError(t, err)
+
+	buffer := new(bytes.Buffer)
+	logger := slog.New(slog.NewTextHandler(buffer, nil))
+
+	sb.SetLogger(logger)
+
+	stream, err := sb.Build()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	go stream.Run(ctx)
+
+	assert.Eventually(t, func() bool {
+		return strings.Contains(buffer.String(), "syntax error: unexpected '='")
+	}, time.Second*10, time.Millisecond*20)
 }
 
 func TestGrpcClientWriterLints(t *testing.T) {

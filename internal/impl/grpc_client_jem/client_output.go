@@ -365,7 +365,7 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	}
 
 	if gcw.healthCheckEnabled {
-		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName)
+		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName) // TODO replace with a TRCE / DBUG LOG
 		dialOpts = append(dialOpts, grpc.WithDefaultServiceConfig(serviceConf))
 	}
 
@@ -480,22 +480,28 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 		if err != nil {
 			return err
 		}
-		if gcw.propResponse {
-			if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
-				jsonBytes, err := dynMsg.MarshalJSON()
-				if err != nil {
-					return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
-				}
 
-				responseMsg := msg.Copy()
-				responseMsg.SetBytes(jsonBytes)
+		if !gcw.propResponse {
+			continue
+		}
 
-				responseBatch := service.MessageBatch{responseMsg}
-				if err := responseBatch.AddSyncResponse(); err != nil {
-					return err
-				}
-			}
-		} // TODO: fallback for unexpected undynamic messages...
+		dynMsg, ok := resProtoMessage.(*dynamic.Message)
+		if !ok {
+			return fmt.Errorf("expected dynamic.Message but got %T", resProtoMessage)
+		}
+
+		jsonBytes, err := dynMsg.MarshalJSON()
+		if err != nil {
+			return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+		}
+
+		responseMsg := msg.Copy()
+		responseMsg.SetBytes(jsonBytes)
+
+		responseBatch := service.MessageBatch{responseMsg}
+		if err := responseBatch.AddSyncResponse(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
