@@ -529,26 +529,34 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 			return err
 		}
 	}
-	if gcw.propResponse {
-		resProtoMessage, err := clientStream.CloseAndReceive()
-		if err != nil {
-			return err
-		}
 
-		if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
-			jsonBytes, err := dynMsg.MarshalJSON()
-			if err != nil {
-				return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
-			}
+	if !gcw.propResponse {
+		_, err := clientStream.CloseAndReceive()
+		return err
+	}
 
-			responseBatch := msgBatch.Copy()
-			responseBatch[0].SetBytes(jsonBytes)
+	resProtoMessage, err := clientStream.CloseAndReceive()
+	if err != nil {
+		return err
+	}
 
-			if err := responseBatch.AddSyncResponse(); err != nil {
-				return err
-			}
-		}
-	} // TODO: fallback for unexpected undynamic messages...
+	dynMsg, ok := resProtoMessage.(*dynamic.Message)
+	if !ok {
+		return fmt.Errorf("expected dynamic.Message but got %T", resProtoMessage)
+	}
+
+	jsonBytes, err := dynMsg.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+	}
+
+	responseMsg := msgBatch[0].Copy()
+	responseMsg.SetBytes(jsonBytes)
+
+	if err := responseMsg.AddSyncResponse(); err != nil {
+		return err
+	}
+
 	return nil
 }
 

@@ -587,9 +587,9 @@ grpc_client_jem:
 	select {
 	case res := <-receiveChan:
 		assert.NoError(t, res)
-		resMsgs := resultStore.Get()
-		resMsg := resMsgs[0]
-		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resMsg.Get(0).AsBytes()))
+		resBatch := resultStore.Get()
+		assert.Equal(t, `{"message":"Hello `+names+`"}`, string(resBatch[0].Get(0).AsBytes()))
+		assert.Equal(t, 1, len(resBatch))
 	case <-time.After(time.Minute):
 		t.Fatal("receive timed out")
 	}
