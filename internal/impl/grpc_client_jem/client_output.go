@@ -386,7 +386,6 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 		if resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
 			return fmt.Errorf("service %q not healthy: %v", gcw.healthCheckServiceName, resp.GetStatus())
 		}
-		fmt.Println("Health check OK for service:", gcw.healthCheckServiceName) // TODO replace with a TRCE / DBUG LOG
 	}
 
 	if gcw.reflection {
@@ -588,14 +587,15 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 			continue
 		}
 
-		responseBatch := msgBatch.Copy()
+		responseBatch := service.MessageBatch{}
 
-		i := 0
 		for {
 			resProtoMessage, err := serverStream.RecvMsg()
 			if err == io.EOF {
-				if err := responseBatch.AddSyncResponse(); err != nil {
-					return err
+				if len(responseBatch) > 0 {
+					if err := responseBatch.AddSyncResponse(); err != nil {
+						return err
+					}
 				}
 				break
 			}
@@ -610,13 +610,10 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 					return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
 				}
 
-				if len(responseBatch)-1 < i {
-					responseBatch = append(responseBatch, service.NewMessage(jsonBytes))
-				} else {
-					responseBatch[i].SetBytes(jsonBytes)
-				}
+				responseMsg := msg.Copy()
+				responseMsg.SetBytes(jsonBytes)
+				responseBatch = append(responseBatch, responseMsg)
 			}
-			i++
 		}
 	}
 	return nil
@@ -643,6 +640,9 @@ func (gcw *grpcClientWriter) bidirectionalHandler(ctx context.Context, msgBatch 
 		if err != nil {
 			return err
 		}
+	}
+	if err := bidi.CloseSend(); err != nil {
+		return err
 	}
 	return nil
 }
