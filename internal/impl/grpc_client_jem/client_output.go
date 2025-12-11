@@ -5,7 +5,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
@@ -34,6 +37,7 @@ const (
 	grpcClientOutputHealthCheck            = "health_check"
 	grpcClientOutputHealthCheckToggle      = "enabled"
 	grpcClientOutputHealthCheckServiceName = "service"
+	grpcClientOutputRetries                = "retries"
 )
 
 const (
@@ -66,6 +70,11 @@ are able to make use of these propagated responses. Also the  ` + "`" + `rpc_typ
 `
 
 func grcpClientOutputSpec() *service.ConfigSpec {
+	retriesDefaults := backoff.NewExponentialBackOff()
+	retriesDefaults.InitialInterval = time.Second
+	retriesDefaults.MaxInterval = time.Second * 5
+	retriesDefaults.MaxElapsedTime = time.Second * 30
+
 	return service.NewConfigSpec().
 		Summary("Sends messages to a GRPC server.").
 		Description(grpcClientOutputDescription).
@@ -104,6 +113,7 @@ output:
 				Default(false),
 			service.NewStringListField(grpcClientOutputProtoFiles).
 				Description("A list of filepaths of .proto files that should contain the schemas necessary for the gRPC method.").
+				Default([]any{}).
 				Example([]string{"./grpc_test_server/helloworld.proto"}),
 			service.NewBoolField(grpcClientOutputPropRes).
 				Description("Whether responses from the server should be [propagated back](/docs/guides/sync_responses) to the input.").
@@ -123,6 +133,7 @@ output:
 			oAuth2FieldSpec(),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
+			service.NewBackOffField(grpcClientOutputRetries, false, retriesDefaults),
 		).LintRule(
 		`root = match { 
   this.rpc_type == "bidi" && this.propagate_response == true => "cannot set propagate_response to true when rpc_type is bidi",
@@ -131,7 +142,6 @@ output:
 	)
 }
 
-// TODO - dedupe from ./internal/httpclient
 const (
 	aFieldOAuth2           = "oauth2"
 	ao2FieldEnabled        = "enabled"
@@ -218,6 +228,8 @@ type grpcClientWriter struct {
 	healthCheckEnabled     bool
 	healthCheckServiceName string
 
+	boffPool sync.Pool
+
 	conn *grpc.ClientConn
 
 	stub   grpcdynamic.Stub
@@ -264,6 +276,11 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		return nil, err
 	}
 	healthCheckServiceName, err := healthCheckConf.FieldString(grpcClientOutputHealthCheckServiceName)
+	if err != nil {
+		return nil, err
+	}
+
+	backoff, err := conf.FieldBackOff(grpcClientOutputRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -321,6 +338,14 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		propResponse: propResponse,
 		tls:          tls,
 		oauth:        oauth,
+
+		boffPool: sync.Pool{
+			New: func() any {
+				bo := *backoff
+				bo.Reset()
+				return &bo
+			},
+		},
 
 		healthCheckEnabled:     healthCheckEnabled,
 		healthCheckServiceName: healthCheckServiceName,
@@ -469,8 +494,13 @@ func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
 //------------------------------------------------------------------------------
 
 func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+	boff := gcw.boffPool.Get().(backoff.BackOff)
+	defer func() {
+		boff.Reset()
+		gcw.boffPool.Put(boff)
+	}()
 
-	for _, msg := range msgBatch { // TODO batch aware error handling
+	for _, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
 		if err != nil {
 			return err
@@ -482,8 +512,18 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 		}
 
 		resProtoMessage, err := gcw.stub.InvokeRpc(ctx, gcw.method, request)
-		if err != nil {
-			return err
+		for err != nil {
+			wait := boff.NextBackOff()
+			if wait == backoff.Stop {
+				return err
+			}
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return err
+			}
+			fmt.Println("RETRYING ... ")
+			resProtoMessage, err = gcw.stub.InvokeRpc(ctx, gcw.method, request)
 		}
 
 		if !gcw.propResponse {
@@ -566,7 +606,6 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 }
 
 func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
-
 	for _, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
 		if err != nil {

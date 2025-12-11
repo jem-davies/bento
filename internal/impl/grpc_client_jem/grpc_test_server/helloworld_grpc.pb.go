@@ -34,6 +34,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Greeter_SayHello_FullMethodName          = "/helloworld.Greeter/SayHello"
+	Greeter_SayHelloFlaky_FullMethodName     = "/helloworld.Greeter/SayHelloFlaky"
 	Greeter_SayMultipleHellos_FullMethodName = "/helloworld.Greeter/SayMultipleHellos"
 	Greeter_SayHelloHowAreYou_FullMethodName = "/helloworld.Greeter/SayHelloHowAreYou"
 	Greeter_SayHelloBidi_FullMethodName      = "/helloworld.Greeter/SayHelloBidi"
@@ -47,6 +48,8 @@ const (
 type GreeterClient interface {
 	// Sends a greeting
 	SayHello(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloReply, error)
+	// Sends a greeting but is Flaky
+	SayHelloFlaky(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloReply, error)
 	// Accepts a stream of HelloRequest and sends a greeting
 	SayMultipleHellos(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[HelloRequest, HelloReply], error)
 	// Accepts a hello request and returns a stream of greetings
@@ -67,6 +70,16 @@ func (c *greeterClient) SayHello(ctx context.Context, in *HelloRequest, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HelloReply)
 	err := c.cc.Invoke(ctx, Greeter_SayHello_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *greeterClient) SayHelloFlaky(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HelloReply)
+	err := c.cc.Invoke(ctx, Greeter_SayHelloFlaky_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +139,8 @@ type Greeter_SayHelloBidiClient = grpc.BidiStreamingClient[HelloRequest, HelloRe
 type GreeterServer interface {
 	// Sends a greeting
 	SayHello(context.Context, *HelloRequest) (*HelloReply, error)
+	// Sends a greeting but is Flaky
+	SayHelloFlaky(context.Context, *HelloRequest) (*HelloReply, error)
 	// Accepts a stream of HelloRequest and sends a greeting
 	SayMultipleHellos(grpc.ClientStreamingServer[HelloRequest, HelloReply]) error
 	// Accepts a hello request and returns a stream of greetings
@@ -144,6 +159,9 @@ type UnimplementedGreeterServer struct{}
 
 func (UnimplementedGreeterServer) SayHello(context.Context, *HelloRequest) (*HelloReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SayHello not implemented")
+}
+func (UnimplementedGreeterServer) SayHelloFlaky(context.Context, *HelloRequest) (*HelloReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SayHelloFlaky not implemented")
 }
 func (UnimplementedGreeterServer) SayMultipleHellos(grpc.ClientStreamingServer[HelloRequest, HelloReply]) error {
 	return status.Errorf(codes.Unimplemented, "method SayMultipleHellos not implemented")
@@ -193,6 +211,24 @@ func _Greeter_SayHello_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Greeter_SayHelloFlaky_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HelloRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GreeterServer).SayHelloFlaky(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Greeter_SayHelloFlaky_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GreeterServer).SayHelloFlaky(ctx, req.(*HelloRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Greeter_SayMultipleHellos_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(GreeterServer).SayMultipleHellos(&grpc.GenericServerStream[HelloRequest, HelloReply]{ServerStream: stream})
 }
@@ -228,6 +264,10 @@ var Greeter_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SayHello",
 			Handler:    _Greeter_SayHello_Handler,
+		},
+		{
+			MethodName: "SayHelloFlaky",
+			Handler:    _Greeter_SayHelloFlaky_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

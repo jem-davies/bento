@@ -47,6 +47,10 @@ output:
       period: ""
       jitter: 0
       check: ""
+    retries:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
 ```
 
 </TabItem>
@@ -89,6 +93,10 @@ output:
       jitter: 0
       check: ""
       processors: [] # No default (optional)
+    retries:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
 ```
 
 </TabItem>
@@ -123,7 +131,7 @@ are able to make use of these propagated responses. Also the  `rpc_type`effects 
 
 <TabItem value="HTTP <--> gRPC Reverse Proxy">
 
-You can use Bento to reverse proxy between a X and gRPC
+Use Bento as a reverse proxy to translate HTTP requests into gRPC calls and return the response
 
 ```yaml
 input:
@@ -580,6 +588,61 @@ processors:
 processors:
   - archive:
       format: json_array
+```
+
+### `retries`
+
+Determine time intervals and cut offs for retry attempts.
+
+
+Type: `object`  
+
+### `retries.initial_interval`
+
+The initial period to wait between retry attempts.
+
+
+Type: `string`  
+Default: `"1s"`  
+
+```yml
+# Examples
+
+initial_interval: 50ms
+
+initial_interval: 1s
+```
+
+### `retries.max_interval`
+
+The maximum period to wait between retry attempts
+
+
+Type: `string`  
+Default: `"5s"`  
+
+```yml
+# Examples
+
+max_interval: 5s
+
+max_interval: 1m
+```
+
+### `retries.max_elapsed_time`
+
+The maximum overall period of time to spend on retry attempts before the request is aborted.
+
+
+Type: `string`  
+Default: `"30s"`  
+
+```yml
+# Examples
+
+max_elapsed_time: 1m
+
+max_elapsed_time: 1h
 ```
 
 

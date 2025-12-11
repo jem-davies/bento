@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +53,7 @@ type testServer struct {
 
 	mu                           sync.Mutex
 	SayHelloInvocations          int
+	SayHelloFlakyInvocations     int
 	SayMultiHellosInvocations    int
 	SayHelloHowAreYouInvocations int
 	SayHelloBidiInvocations      int
@@ -149,6 +151,13 @@ func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (
 	s.SayHelloInvocations++
 	s.mu.Unlock()
 	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
+}
+
+func (s *testServer) SayHelloFlaky(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
+	s.mu.Lock()
+	s.SayHelloFlakyInvocations++
+	s.mu.Unlock()
+	return nil, errors.New("FLAKY")
 }
 
 func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHellosServer) error {
@@ -847,4 +856,54 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 	t.Cleanup(s.TriggerCloseNow)
 
 	return sendChan, receiveChan, nil
+}
+
+func TestGrpcClientWriterRetry(t *testing.T) {
+	tests := map[string]struct {
+		grpcServerOpts   []testServerOpt
+		confFormatString string
+		formatArgs       func(*testServer) []any
+	}{
+		"Unary Reflection Retry": {
+			grpcServerOpts: []testServerOpt{withReflection()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHelloFlaky
+  reflection: true
+  retries:
+    initial_interval: 1s
+    max_interval: 5s
+    max_elapsed_time: 15s
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+		}}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			testServer := startGRPCServer(t, test.grpcServerOpts...)
+
+			yamlConf := fmt.Sprintf(test.confFormatString, test.formatArgs(testServer)...)
+
+			sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+			require.NoError(t, err)
+
+			input := `{"name":"Alice"}`
+			testMsg := message.QuickBatch([][]byte{[]byte(input)})
+			select {
+			case sendChan <- message.NewTransaction(testMsg, receiveChan):
+			case <-time.After(time.Second * 20):
+				t.Fatal("Send timed out")
+			}
+
+			assert.Eventually(t, func() bool {
+				return testServer.SayHelloFlakyInvocations == 6
+			}, time.Second*20, time.Millisecond*200)
+		})
+	}
 }
