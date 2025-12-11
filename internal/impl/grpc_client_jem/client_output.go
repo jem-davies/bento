@@ -366,7 +366,7 @@ func (gcw *grpcClientWriter) Connect(ctx context.Context) (err error) {
 	}
 
 	if gcw.healthCheckEnabled {
-		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName) // TODO replace with a TRCE / DBUG LOG
+		serviceConf := fmt.Sprintf(`{"healthCheckConfig": {"serviceName": "%v"}}`, gcw.healthCheckServiceName)
 		dialOpts = append(dialOpts, grpc.WithDefaultServiceConfig(serviceConf))
 	}
 
@@ -584,32 +584,36 @@ func (gcw *grpcClientWriter) serverStreamHandler(ctx context.Context, msgBatch s
 			return err
 		}
 
-		i := 0
+		if !gcw.propResponse {
+			continue
+		}
+
 		responseBatch := msgBatch.Copy()
 
+		i := 0
 		for {
 			resProtoMessage, err := serverStream.RecvMsg()
 			if err == io.EOF {
-				if gcw.propResponse {
-					if err := responseBatch.AddSyncResponse(); err != nil {
-						return err
-					}
+				if err := responseBatch.AddSyncResponse(); err != nil {
+					return err
 				}
 				break
 			}
 
-			if gcw.propResponse {
-				if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
-					jsonBytes, err := dynMsg.MarshalJSON()
-					if err != nil {
-						return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
-					}
+			if err != nil {
+				return fmt.Errorf("failed to receive from server stream: %w", err)
+			}
 
-					if len(responseBatch)-1 < i { // TODO: propResponse logic / msg copying
-						responseBatch = append(responseBatch, service.NewMessage(jsonBytes))
-					} else {
-						responseBatch[i].SetBytes(jsonBytes)
-					}
+			if dynMsg, ok := resProtoMessage.(*dynamic.Message); ok {
+				jsonBytes, err := dynMsg.MarshalJSON()
+				if err != nil {
+					return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+				}
+
+				if len(responseBatch)-1 < i {
+					responseBatch = append(responseBatch, service.NewMessage(jsonBytes))
+				} else {
+					responseBatch[i].SetBytes(jsonBytes)
 				}
 			}
 			i++
