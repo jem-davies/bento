@@ -5,10 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"sync"
-	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
@@ -37,7 +34,6 @@ const (
 	grpcClientOutputHealthCheck            = "health_check"
 	grpcClientOutputHealthCheckToggle      = "enabled"
 	grpcClientOutputHealthCheckServiceName = "service"
-	grpcClientOutputRetries                = "retries"
 )
 
 const (
@@ -53,10 +49,6 @@ const grpcClientOutputDescription = `
 
 Either the field ` + "`reflection` or `proto_files`" + ` must be supplied, which will provide the protobuf schema Bento will use to marshall the Bento message into protobuf.
 
-### Retries 
-
-TODO ...
-
 ### Propagating Responses
 
 It's possible to propagate the response(s) from each gRPC method invocation back to the input source by
@@ -70,11 +62,6 @@ are able to make use of these propagated responses. Also the  ` + "`" + `rpc_typ
 `
 
 func grcpClientOutputSpec() *service.ConfigSpec {
-	retriesDefaults := backoff.NewExponentialBackOff()
-	retriesDefaults.InitialInterval = time.Second
-	retriesDefaults.MaxInterval = time.Second * 5
-	retriesDefaults.MaxElapsedTime = time.Second * 30
-
 	return service.NewConfigSpec().
 		Summary("Sends messages to a GRPC server.").
 		Description(grpcClientOutputDescription).
@@ -133,7 +120,6 @@ output:
 			oAuth2FieldSpec(),
 			service.NewOutputMaxInFlightField(),
 			service.NewBatchPolicyField(grpcClientOutputBatching),
-			service.NewBackOffField(grpcClientOutputRetries, false, retriesDefaults),
 		).LintRule(
 		`root = match { 
   this.rpc_type == "bidi" && this.propagate_response == true => "cannot set propagate_response to true when rpc_type is bidi",
@@ -228,8 +214,6 @@ type grpcClientWriter struct {
 	healthCheckEnabled     bool
 	healthCheckServiceName string
 
-	boffPool sync.Pool
-
 	conn *grpc.ClientConn
 
 	stub   grpcdynamic.Stub
@@ -276,11 +260,6 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		return nil, err
 	}
 	healthCheckServiceName, err := healthCheckConf.FieldString(grpcClientOutputHealthCheckServiceName)
-	if err != nil {
-		return nil, err
-	}
-
-	backoff, err := conf.FieldBackOff(grpcClientOutputRetries)
 	if err != nil {
 		return nil, err
 	}
@@ -338,14 +317,6 @@ func newGrpcClientWriterFromParsed(conf *service.ParsedConfig, _ *service.Resour
 		propResponse: propResponse,
 		tls:          tls,
 		oauth:        oauth,
-
-		boffPool: sync.Pool{
-			New: func() any {
-				bo := *backoff
-				bo.Reset()
-				return &bo
-			},
-		},
 
 		healthCheckEnabled:     healthCheckEnabled,
 		healthCheckServiceName: healthCheckServiceName,
@@ -494,11 +465,6 @@ func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
 //------------------------------------------------------------------------------
 
 func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.MessageBatch) error {
-	boff := gcw.boffPool.Get().(backoff.BackOff)
-	defer func() {
-		boff.Reset()
-		gcw.boffPool.Put(boff)
-	}()
 
 	for _, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
@@ -512,17 +478,8 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 		}
 
 		resProtoMessage, err := gcw.stub.InvokeRpc(ctx, gcw.method, request)
-		for err != nil {
-			wait := boff.NextBackOff()
-			if wait == backoff.Stop {
-				return err
-			}
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return err
-			}
-			resProtoMessage, err = gcw.stub.InvokeRpc(ctx, gcw.method, request)
+		if err != nil {
+			return err
 		}
 
 		if !gcw.propResponse {
@@ -551,11 +508,6 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 }
 
 func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
-	boff := gcw.boffPool.Get().(backoff.BackOff)
-	defer func() {
-		boff.Reset()
-		gcw.boffPool.Put(boff)
-	}()
 
 	clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
 	if err != nil {
@@ -574,34 +526,14 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 		}
 
 		err = clientStream.SendMsg(request)
-		for err != nil {
-			wait := boff.NextBackOff()
-			if wait == backoff.Stop {
-				return err
-			}
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
-				return err
-			}
-			fmt.Println("RETRYING SENDMSG ...")
-			err = clientStream.SendMsg(request)
+		if err != nil {
+			return err
 		}
 	}
 
 	resProtoMessage, err := clientStream.CloseAndReceive()
-	for err != nil {
-		wait := boff.NextBackOff()
-		if wait == backoff.Stop {
-			return err
-		}
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return err
-		}
-		fmt.Println("RETRYING CLOSE AND RECEIVE ...")
-		resProtoMessage, err = clientStream.CloseAndReceive()
+	if err != nil {
+		return err
 	}
 
 	if !gcw.propResponse {
