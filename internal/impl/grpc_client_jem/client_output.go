@@ -465,21 +465,31 @@ func (gcw *grpcClientWriter) Close(ctx context.Context) (err error) {
 //------------------------------------------------------------------------------
 
 func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+	var batchErr *service.BatchError
+	batchErrFailed := func(i int, err error) {
+		if batchErr == nil {
+			batchErr = service.NewBatchError(msgBatch, err)
+		}
+		batchErr.Failed(i, err)
+	}
 
-	for _, msg := range msgBatch {
+	for i, msg := range msgBatch {
 		msgBytes, err := msg.AsBytes()
 		if err != nil {
-			return err
+			batchErrFailed(i, err)
+			continue
 		}
 
 		request := dynamic.NewMessage(gcw.method.GetInputType())
 		if err := request.UnmarshalJSON(msgBytes); err != nil {
-			return err
+			batchErrFailed(i, err)
+			continue
 		}
 
 		resProtoMessage, err := gcw.stub.InvokeRpc(ctx, gcw.method, request)
 		if err != nil {
-			return err
+			batchErrFailed(i, err)
+			continue
 		}
 
 		if !gcw.propResponse {
@@ -488,12 +498,14 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 
 		dynMsg, ok := resProtoMessage.(*dynamic.Message)
 		if !ok {
-			return fmt.Errorf("expected dynamic.Message but got %T", resProtoMessage)
+			batchErrFailed(i, fmt.Errorf("expected dynamic.Message but got %T", resProtoMessage))
+			continue
 		}
 
 		jsonBytes, err := dynMsg.MarshalJSON()
 		if err != nil {
-			return fmt.Errorf("failed to marshal proto response to JSON: %w", err)
+			batchErrFailed(i, fmt.Errorf("failed to marshal proto response to JSON: %w", err))
+			continue
 		}
 
 		responseMsg := msg.Copy()
@@ -501,9 +513,15 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 
 		responseBatch := service.MessageBatch{responseMsg}
 		if err := responseBatch.AddSyncResponse(); err != nil {
-			return err
+			batchErrFailed(i, err)
+			continue
 		}
 	}
+
+	if batchErr != nil && batchErr.IndexedErrors() > 0 {
+		return batchErr
+	}
+
 	return nil
 }
 

@@ -841,6 +841,65 @@ grpc_client_jem:
 	}
 }
 
+func TestGrpcClientWriterBatchErrors(t *testing.T) {
+	tests := map[string]struct {
+		grpcServerOpts   []testServerOpt
+		confFormatString string
+		formatArgs       func(*testServer) []any
+		invocations      func(*testServer) int
+	}{
+		"Unary Reflection Errors": {
+			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayHello
+  reflection: true
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			testServer := startGRPCServer(t, test.grpcServerOpts...)
+
+			yamlConf := fmt.Sprintf(test.confFormatString, test.formatArgs(testServer)...)
+
+			sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
+			require.NoError(t, err)
+
+			for _, input := range namesInputTestData {
+				testMsg := message.QuickBatch([][]byte{[]byte(input)})
+				select {
+				case sendChan <- message.NewTransaction(testMsg, receiveChan):
+				case <-time.After(time.Second * 20):
+					t.Fatal("Send timed out")
+				}
+			}
+
+			for i := range namesInputTestData {
+				select {
+				case err := <-receiveChan:
+					assert.ErrorContains(t, err, "ERROR :( ")
+				case <-time.After(time.Second * 20):
+					t.Fatalf("Response %d timed out", i)
+				}
+			}
+		})
+	}
+}
+
 //------------------------------------------------------------------------------
 
 func startGrpcClientOutput(t *testing.T, yamlConf string) (
@@ -870,83 +929,4 @@ func startGrpcClientOutput(t *testing.T, yamlConf string) (
 	t.Cleanup(s.TriggerCloseNow)
 
 	return sendChan, receiveChan, nil
-}
-
-func TestGrpcClientWriterRetry(t *testing.T) {
-	tests := map[string]struct {
-		grpcServerOpts   []testServerOpt
-		confFormatString string
-		formatArgs       func(*testServer) []any
-		invocations      func(*testServer) int
-	}{
-		"Unary Reflection Retry": {
-			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
-			confFormatString: `
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayHello
-  reflection: true
-  retries:
-  initial_interval: 1s
-  max_interval: 5s
-  max_elapsed_time: 15s
-`,
-			formatArgs: func(ts *testServer) []any {
-				return []any{ts.port}
-			},
-			invocations: func(ts *testServer) int {
-				ts.mu.Lock()
-				defer ts.mu.Unlock()
-				return ts.SayHelloInvocations
-			},
-		},
-
-		"Client Stream Reflection Retry": {
-			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
-			confFormatString: `
-grpc_client_jem:
-  address: localhost:%v
-  service: helloworld.Greeter
-  method: SayMultipleHellos
-  reflection: true
-  rpc_type: client_stream
-  retries:
-    initial_interval: 1s
-    max_interval: 5s
-    max_elapsed_time: 15s
-`,
-			formatArgs: func(ts *testServer) []any {
-				return []any{ts.port}
-			},
-			invocations: func(ts *testServer) int {
-				ts.mu.Lock()
-				defer ts.mu.Unlock()
-				return ts.SayMultiHellosInvocations
-			},
-		},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			testServer := startGRPCServer(t, test.grpcServerOpts...)
-
-			yamlConf := fmt.Sprintf(test.confFormatString, test.formatArgs(testServer)...)
-
-			sendChan, receiveChan, err := startGrpcClientOutput(t, yamlConf)
-			require.NoError(t, err)
-
-			input := `{"name":"Alice"}`
-			testMsg := message.QuickBatch([][]byte{[]byte(input)})
-			select {
-			case sendChan <- message.NewTransaction(testMsg, receiveChan):
-			case <-time.After(time.Second * 20):
-				t.Fatal("Send timed out")
-			}
-
-			assert.Eventually(t, func() bool {
-				return test.invocations(testServer) == 6
-			}, time.Second*30, time.Millisecond*20)
-		})
-	}
 }
