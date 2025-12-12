@@ -135,10 +135,9 @@ const file_helloworld_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"&\n" +
 	"\n" +
 	"HelloReply\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage2\xec\x02\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage2\xa7\x02\n" +
 	"\aGreeter\x12>\n" +
-	"\bSayHello\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x00\x12C\n" +
-	"\rSayHelloFlaky\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x00\x12I\n" +
+	"\bSayHello\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x00\x12I\n" +
 	"\x11SayMultipleHellos\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x00(\x01\x12I\n" +
 	"\x11SayHelloHowAreYou\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x000\x01\x12F\n" +
 	"\fSayHelloBidi\x12\x18.helloworld.HelloRequest\x1a\x16.helloworld.HelloReply\"\x00(\x010\x01Bg\n" +
@@ -163,17 +162,15 @@ var file_helloworld_proto_goTypes = []any{
 }
 var file_helloworld_proto_depIdxs = []int32{
 	0, // 0: helloworld.Greeter.SayHello:input_type -> helloworld.HelloRequest
-	0, // 1: helloworld.Greeter.SayHelloFlaky:input_type -> helloworld.HelloRequest
-	0, // 2: helloworld.Greeter.SayMultipleHellos:input_type -> helloworld.HelloRequest
-	0, // 3: helloworld.Greeter.SayHelloHowAreYou:input_type -> helloworld.HelloRequest
-	0, // 4: helloworld.Greeter.SayHelloBidi:input_type -> helloworld.HelloRequest
-	1, // 5: helloworld.Greeter.SayHello:output_type -> helloworld.HelloReply
-	1, // 6: helloworld.Greeter.SayHelloFlaky:output_type -> helloworld.HelloReply
-	1, // 7: helloworld.Greeter.SayMultipleHellos:output_type -> helloworld.HelloReply
-	1, // 8: helloworld.Greeter.SayHelloHowAreYou:output_type -> helloworld.HelloReply
-	1, // 9: helloworld.Greeter.SayHelloBidi:output_type -> helloworld.HelloReply
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
+	0, // 1: helloworld.Greeter.SayMultipleHellos:input_type -> helloworld.HelloRequest
+	0, // 2: helloworld.Greeter.SayHelloHowAreYou:input_type -> helloworld.HelloRequest
+	0, // 3: helloworld.Greeter.SayHelloBidi:input_type -> helloworld.HelloRequest
+	1, // 4: helloworld.Greeter.SayHello:output_type -> helloworld.HelloReply
+	1, // 5: helloworld.Greeter.SayMultipleHellos:output_type -> helloworld.HelloReply
+	1, // 6: helloworld.Greeter.SayHelloHowAreYou:output_type -> helloworld.HelloReply
+	1, // 7: helloworld.Greeter.SayHelloBidi:output_type -> helloworld.HelloReply
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name

@@ -522,7 +522,6 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 			case <-ctx.Done():
 				return err
 			}
-			fmt.Println("RETRYING ... ")
 			resProtoMessage, err = gcw.stub.InvokeRpc(ctx, gcw.method, request)
 		}
 
@@ -552,7 +551,6 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 }
 
 func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
-
 	clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
 	if err != nil {
 		return err

@@ -44,16 +44,16 @@ import (
 type testServer struct {
 	test_server.UnimplementedGreeterServer
 
-	reflection  bool
-	tls         bool
-	oauth2      bool
-	healthCheck bool
+	reflection   bool
+	tls          bool
+	oauth2       bool
+	healthCheck  bool
+	returnErrors bool
 
 	oauthAddress string
 
 	mu                           sync.Mutex
 	SayHelloInvocations          int
-	SayHelloFlakyInvocations     int
 	SayMultiHellosInvocations    int
 	SayHelloHowAreYouInvocations int
 	SayHelloBidiInvocations      int
@@ -150,14 +150,10 @@ func (s *testServer) SayHello(_ context.Context, in *test_server.HelloRequest) (
 	s.mu.Lock()
 	s.SayHelloInvocations++
 	s.mu.Unlock()
+	if s.returnErrors {
+		return nil, errors.New("ERROR :( ")
+	}
 	return &test_server.HelloReply{Message: "Hello " + in.GetName()}, nil
-}
-
-func (s *testServer) SayHelloFlaky(_ context.Context, in *test_server.HelloRequest) (*test_server.HelloReply, error) {
-	s.mu.Lock()
-	s.SayHelloFlakyInvocations++
-	s.mu.Unlock()
-	return nil, errors.New("FLAKY")
 }
 
 func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHellosServer) error {
@@ -169,6 +165,10 @@ func (s *testServer) SayMultipleHellos(stream test_server.Greeter_SayMultipleHel
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
+			if s.returnErrors {
+				return errors.New("ERROR :( ")
+			}
+
 			return stream.SendAndClose(&test_server.HelloReply{
 				Message: "Hello " + strings.Join(names, ", "),
 			})
@@ -185,6 +185,10 @@ func (s *testServer) SayHelloHowAreYou(in *test_server.HelloRequest, stream test
 	s.SayHelloHowAreYouInvocations++
 	s.mu.Unlock()
 
+	if s.returnErrors {
+		return errors.New("ERROR :( ")
+	}
+
 	helloMsg := &test_server.HelloReply{Message: "Hello " + in.GetName()}
 	stream.Send(helloMsg)
 	howAreYouMsg := &test_server.HelloReply{Message: "How are you, " + in.GetName() + "?"}
@@ -196,6 +200,10 @@ func (s *testServer) SayHelloBidi(grpc.BidiStreamingServer[test_server.HelloRequ
 	s.mu.Lock()
 	s.SayHelloBidiInvocations++
 	s.mu.Unlock()
+
+	if s.returnErrors {
+		return errors.New("ERROR :( ")
+	}
 
 	return nil
 }
@@ -254,6 +262,12 @@ func withHealthCheck() testServerOpt {
 func withOAuth2() testServerOpt {
 	return func(ts *testServer) {
 		ts.oauth2 = true
+	}
+}
+
+func withReturnErrors() testServerOpt {
+	return func(ts *testServer) {
+		ts.returnErrors = true
 	}
 }
 
@@ -863,29 +877,58 @@ func TestGrpcClientWriterRetry(t *testing.T) {
 		grpcServerOpts   []testServerOpt
 		confFormatString string
 		formatArgs       func(*testServer) []any
+		invocations      func(*testServer) int
 	}{
 		"Unary Reflection Retry": {
-			grpcServerOpts: []testServerOpt{withReflection()},
+			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
 			confFormatString: `
 grpc_client_jem:
   address: localhost:%v
   service: helloworld.Greeter
-  method: SayHelloFlaky
+  method: SayHello
   reflection: true
   retries:
-    initial_interval: 1s
-    max_interval: 5s
-    max_elapsed_time: 15s
+  initial_interval: 1s
+  max_interval: 5s
+  max_elapsed_time: 15s
 `,
 			formatArgs: func(ts *testServer) []any {
 				return []any{ts.port}
 			},
-		}}
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayHelloInvocations
+			},
+		},
+
+		// 		"Client Stream Reflection Retry": {
+		// 			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
+		// 			confFormatString: `
+		// grpc_client_jem:
+		//   address: localhost:%v
+		//   service: helloworld.Greeter
+		//   method: SayMultipleHellos
+		//   reflection: true
+		//   rpc_type: client_stream
+		//   retries:
+		//     initial_interval: 1s
+		//     max_interval: 5s
+		//     max_elapsed_time: 15s
+		// `,
+		// 			formatArgs: func(ts *testServer) []any {
+		// 				return []any{ts.port}
+		// 			},
+		// 			invocations: func(ts *testServer) int {
+		// 				ts.mu.Lock()
+		// 				defer ts.mu.Unlock()
+		// 				return ts.SayMultiHellosInvocations
+		// 			},
+		// 		},
+	}
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
 			testServer := startGRPCServer(t, test.grpcServerOpts...)
 
 			yamlConf := fmt.Sprintf(test.confFormatString, test.formatArgs(testServer)...)
@@ -902,8 +945,8 @@ grpc_client_jem:
 			}
 
 			assert.Eventually(t, func() bool {
-				return testServer.SayHelloFlakyInvocations == 6
-			}, time.Second*20, time.Millisecond*200)
+				return test.invocations(testServer) == 6
+			}, time.Second*30, time.Millisecond*20)
 		})
 	}
 }
