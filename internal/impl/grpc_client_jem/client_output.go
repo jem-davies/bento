@@ -551,6 +551,12 @@ func (gcw *grpcClientWriter) unaryHandler(ctx context.Context, msgBatch service.
 }
 
 func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch service.MessageBatch) error {
+	boff := gcw.boffPool.Get().(backoff.BackOff)
+	defer func() {
+		boff.Reset()
+		gcw.boffPool.Put(boff)
+	}()
+
 	clientStream, err := gcw.stub.InvokeRpcClientStream(ctx, gcw.method)
 	if err != nil {
 		return err
@@ -568,18 +574,37 @@ func (gcw *grpcClientWriter) clientStreamHandler(ctx context.Context, msgBatch s
 		}
 
 		err = clientStream.SendMsg(request)
-		if err != nil {
-			return err
+		for err != nil {
+			wait := boff.NextBackOff()
+			if wait == backoff.Stop {
+				return err
+			}
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return err
+			}
+			fmt.Println("RETRYING SENDMSG ...")
+			err = clientStream.SendMsg(request)
 		}
 	}
 
-	if !gcw.propResponse {
-		_, err := clientStream.CloseAndReceive()
-		return err
+	resProtoMessage, err := clientStream.CloseAndReceive()
+	for err != nil {
+		wait := boff.NextBackOff()
+		if wait == backoff.Stop {
+			return err
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return err
+		}
+		fmt.Println("RETRYING CLOSE AND RECEIVE ...")
+		resProtoMessage, err = clientStream.CloseAndReceive()
 	}
 
-	resProtoMessage, err := clientStream.CloseAndReceive()
-	if err != nil {
+	if !gcw.propResponse {
 		return err
 	}
 

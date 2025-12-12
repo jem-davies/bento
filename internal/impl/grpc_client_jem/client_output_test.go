@@ -902,29 +902,29 @@ grpc_client_jem:
 			},
 		},
 
-		// 		"Client Stream Reflection Retry": {
-		// 			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
-		// 			confFormatString: `
-		// grpc_client_jem:
-		//   address: localhost:%v
-		//   service: helloworld.Greeter
-		//   method: SayMultipleHellos
-		//   reflection: true
-		//   rpc_type: client_stream
-		//   retries:
-		//     initial_interval: 1s
-		//     max_interval: 5s
-		//     max_elapsed_time: 15s
-		// `,
-		// 			formatArgs: func(ts *testServer) []any {
-		// 				return []any{ts.port}
-		// 			},
-		// 			invocations: func(ts *testServer) int {
-		// 				ts.mu.Lock()
-		// 				defer ts.mu.Unlock()
-		// 				return ts.SayMultiHellosInvocations
-		// 			},
-		// 		},
+		"Client Stream Reflection Retry": {
+			grpcServerOpts: []testServerOpt{withReflection(), withReturnErrors()},
+			confFormatString: `
+grpc_client_jem:
+  address: localhost:%v
+  service: helloworld.Greeter
+  method: SayMultipleHellos
+  reflection: true
+  rpc_type: client_stream
+  retries:
+    initial_interval: 1s
+    max_interval: 5s
+    max_elapsed_time: 15s
+`,
+			formatArgs: func(ts *testServer) []any {
+				return []any{ts.port}
+			},
+			invocations: func(ts *testServer) int {
+				ts.mu.Lock()
+				defer ts.mu.Unlock()
+				return ts.SayMultiHellosInvocations
+			},
+		},
 	}
 
 	for name, test := range tests {
