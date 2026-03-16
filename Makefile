@@ -23,7 +23,7 @@ VER_FLAGS = -X main.Version=$(VERSION) -X main.DateBuilt=$(DATE)
 
 LD_FLAGS   ?= -w -s
 GO_FLAGS   ?=
-DOCS_FLAGS ?= x_bento_extra
+DOCS_FLAGS ?=
 
 APPS = bento
 all: $(APPS)
