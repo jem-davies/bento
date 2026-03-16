@@ -1,6 +1,7 @@
 name: Test
 
 on:
+  workflow_dispatch: {}
   push:
     branches:
       - main
@@ -53,7 +54,7 @@ jobs:
     - name: Lint
       uses: golangci/golangci-lint-action@v9
       with:
-        version: v2.5.0
+        version: v2.10.0
 
   build-docsite:
 
