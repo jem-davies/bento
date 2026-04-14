@@ -13,8 +13,9 @@ import (
 )
 
 type field struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 type reference struct {

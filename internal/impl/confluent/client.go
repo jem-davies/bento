@@ -11,68 +11,35 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
-func sanitizeNamespacePart(n, k string) string {
-	parts := strings.Split(n, ".")
-	if k == "name" {
-		if len(parts) <= 1 {
-			return n
+func sanitizePart(part string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return r
 		}
-		for i, p := range parts[:len(parts)-1] {
-			parts[i] = regexp.MustCompile(`[^A-Za-z0-9_]`).ReplaceAllString(p, "")
-		}
-		return strings.Join(parts, ".")
-	} else {
-		for i, p := range parts {
-			parts[i] = regexp.MustCompile(`[^A-Za-z0-9_]`).ReplaceAllString(p, "")
-		}
-		return strings.Join(parts, ".")
-	}
+		return -1
+	}, part)
 }
 
-func updateNamespaces(res1 map[string]any, res2 []any) {
-	for k, v := range res1 {
-		if k == "references" {
-			continue
-		}
-		if k == "namespace" || k == "name" {
-			if strVal, ok := v.(string); ok {
-				res1[k] = sanitizeNamespacePart(strVal, k)
-			}
-		}
-		// If the key is "schema" and the value is a JSON string, parse and recurse into it
-		if k == "schema" {
-			if strVal, ok := v.(string); ok {
-				var schemaDef map[string]any
-				if jsonErr := json.Unmarshal([]byte(strVal), &schemaDef); jsonErr == nil {
-					updateNamespaces(schemaDef, nil)
-					if cleaned, jsonErr := json.Marshal(schemaDef); jsonErr == nil {
-						res1[k] = string(cleaned)
-					}
-				}
-			}
-		}
-		switch vv := v.(type) {
-		case []any:
-			updateNamespaces(nil, vv)
-		case map[string]any:
-			updateNamespaces(vv, nil)
-		}
+func sanitizeNamespace(p string) string {
+	parts := strings.Split(p, ".")
+	for i, part := range parts {
+		parts[i] = sanitizePart(part)
 	}
+	return strings.Join(parts, ".")
+}
 
-	for _, v := range res2 {
-		switch vv := v.(type) {
-		case []any:
-			updateNamespaces(nil, vv)
-		case map[string]any:
-			updateNamespaces(vv, nil)
-		}
+func sanitizeFieldName(p string) string {
+	parts := strings.Split(p, ".")
+	for i, part := range parts[:len(parts)-1] {
+		parts[i] = sanitizePart(part)
 	}
+	return strings.Join(parts, ".")
 }
 
 type schemaRegistryClient struct {
@@ -142,6 +109,27 @@ type SchemaInfo struct {
 	References []SchemaReference `json:"references"`
 }
 
+func (s *SchemaInfo) SanitizeSchema() error {
+	var ref reference
+	if err := json.Unmarshal([]byte(s.Schema), &ref); err != nil {
+		return err
+	}
+
+	ref.Namespace = sanitizeNamespace(ref.Namespace)
+	for i := range ref.Fields {
+		ref.Fields[i].Name = sanitizeFieldName(ref.Fields[i].Name)
+		ref.Fields[i].Namespace = sanitizeNamespace(ref.Fields[i].Namespace)
+	}
+
+	contents, err := json.Marshal(ref)
+	if err != nil {
+		return err
+	}
+
+	s.Schema = string(contents)
+	return nil
+}
+
 // TODO: Further reading:
 // https://www.confluent.io/blog/multiple-event-types-in-the-same-kafka-topic/
 type SchemaReference struct {
@@ -171,32 +159,15 @@ func (c *schemaRegistryClient) GetSchemaByID(ctx context.Context, id int) (resPa
 		return
 	}
 
-	if c.namespaceNameSanitize {
-		var res map[string]any
-		nserr := json.Unmarshal(resBody, &res)
-		if nserr != nil {
-			c.mgr.Logger().Errorf("failed to parse response for schema '%v': %v", id, err)
-			return resPayload, nserr
-		}
-
-		updateNamespaces(res, nil)
-
-		cleaned, nserr := json.Marshal(res)
-		if nserr != nil {
-			c.mgr.Logger().Errorf("failed to re-marshal schema '%v': %v", id, nserr)
-			return resPayload, nserr
-		}
-
-		if err = json.Unmarshal(cleaned, &resPayload); err != nil {
-			c.mgr.Logger().Errorf("failed to parse response for schema '%v': %v", id, err)
-		}
-
-		return
-	}
-
 	if err = json.Unmarshal(resBody, &resPayload); err != nil {
 		c.mgr.Logger().Errorf("failed to parse response for schema '%v': %v", id, err)
 		return
+	}
+
+	if c.namespaceNameSanitize {
+		if err = resPayload.SanitizeSchema(); err != nil {
+			return
+		}
 	}
 
 	return
@@ -230,32 +201,15 @@ func (c *schemaRegistryClient) GetSchemaBySubjectAndVersion(ctx context.Context,
 		return
 	}
 
-	if c.namespaceNameSanitize {
-		var res map[string]any
-		nserr := json.Unmarshal(resBody, &res)
-		if nserr != nil {
-			c.mgr.Logger().Errorf("failed to parse response for schema '%v': %v", err)
-			return resPayload, nserr
-		}
-
-		updateNamespaces(res, nil)
-
-		cleaned, nserr := json.Marshal(res)
-		if nserr != nil {
-			c.mgr.Logger().Errorf("failed to re-marshal schema %v", nserr)
-			return resPayload, nserr
-		}
-
-		if err = json.Unmarshal(cleaned, &resPayload); err != nil {
-			c.mgr.Logger().Errorf("failed to parse response for schema %v", err)
-		}
-
-		return
-	}
-
 	if err = json.Unmarshal(resBody, &resPayload); err != nil {
 		c.mgr.Logger().Errorf("failed to parse response for schema subject '%v': %v", subject, err)
 		return
+	}
+
+	if c.namespaceNameSanitize {
+		if err = resPayload.SanitizeSchema(); err != nil {
+			return
+		}
 	}
 
 	return

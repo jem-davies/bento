@@ -114,17 +114,20 @@ func TestUpdateNamespaces(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			var res map[string]any
-			err := json.Unmarshal([]byte(test.testSchema), &res)
-			require.NoError(t, err)
+			type container struct {
+				Schema json.RawMessage `json:"schema"`
+			}
+			var envelope container
+			require.NoError(t, json.Unmarshal([]byte(test.testSchema), &envelope))
 
-			updateNamespaces(res, nil)
+			var cleanedEnvelope container
+			require.NoError(t, json.Unmarshal([]byte(test.cleanedSchema), &cleanedEnvelope))
 
-			cleaned, err := json.Marshal(res)
-			require.NoError(t, err)
+			schema := SchemaInfo{Schema: string(envelope.Schema)}
+			require.NoError(t, schema.SanitizeSchema())
 
 			jdopts := jsondiff.DefaultJSONOptions()
-			diff, explanation := jsondiff.Compare(cleaned, []byte(test.cleanedSchema), &jdopts)
+			diff, explanation := jsondiff.Compare([]byte(schema.Schema), cleanedEnvelope.Schema, &jdopts)
 			assert.Equalf(t, jsondiff.FullMatch.String(), diff.String(), "%s: %s", name, explanation)
 		})
 	}
