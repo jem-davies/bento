@@ -23,11 +23,6 @@ type mockClient struct {
 	start   bool
 }
 
-//go:fix inline
-func stringPtr(s string) *string {
-	return new(s)
-}
-
 func (mc *mockClient) listFoo(token *string) (fooPage []foo, nextToken *string, err error) {
 	if mc.start && token == nil {
 		token = new("page1")

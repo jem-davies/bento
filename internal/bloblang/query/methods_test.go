@@ -2767,10 +2767,3 @@ func TestSliceHelperFunctions(t *testing.T) {
 		assert.Equal(t, []any{"b", "c"}, result)
 	})
 }
-
-// Helper function to create pointers to int64 values
-//
-//go:fix inline
-func ptr(i int64) *int64 {
-	return new(i)
-}
