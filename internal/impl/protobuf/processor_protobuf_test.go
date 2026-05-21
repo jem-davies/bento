@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"buf.build/gen/go/bufbuild/reflect/connectrpc/go/buf/reflect/v1beta1/reflectv1beta1connect"
@@ -108,7 +109,7 @@ discard_unknown: %t
 		})
 
 		t.Run(test.name+" bsr", func(t *testing.T) {
-			mockBSRServerAddress := runMockBSRServer(t)
+			mockBSRServerAddress, _ := runMockBSRServer(t)
 
 			conf, err := protobufProcessorSpec().ParseYAML(fmt.Sprintf(`
 operator: from_json
@@ -229,7 +230,7 @@ use_proto_names: %t
 		})
 
 		t.Run(test.name+" bsr", func(t *testing.T) {
-			mockBSRServerAddress := runMockBSRServer(t)
+			mockBSRServerAddress, _ := runMockBSRServer(t)
 
 			conf, err := protobufProcessorSpec().ParseYAML(fmt.Sprintf(`
 operator: to_json
@@ -309,7 +310,7 @@ import_paths: [ %v ]
 		})
 
 		t.Run(test.name+" bsr", func(tt *testing.T) {
-			mockBSRServerAddress := runMockBSRServer(t)
+			mockBSRServerAddress, _ := runMockBSRServer(t)
 
 			conf, err := protobufProcessorSpec().ParseYAML(fmt.Sprintf(`
 operator: %v
@@ -397,14 +398,22 @@ protobuf:
 
 type fileDescriptorSetServer struct {
 	fileDescriptorSet *descriptorpb.FileDescriptorSet
+
+	cc      int
+	ccMutex sync.Mutex
 }
 
 func (s *fileDescriptorSetServer) GetFileDescriptorSet(_ context.Context, request *connect.Request[v1beta1.GetFileDescriptorSetRequest]) (*connect.Response[v1beta1.GetFileDescriptorSetResponse], error) {
+	s.ccMutex.Lock()
+	s.cc++
+	s.ccMutex.Unlock()
+
+	fmt.Printf("CALL TO GetFileDescriptorSet Number: %v\n", s.cc)
 	response := &v1beta1.GetFileDescriptorSetResponse{FileDescriptorSet: s.fileDescriptorSet, Version: request.Msg.GetVersion()}
 	return connect.NewResponse(response), nil
 }
 
-func runMockBSRServer(t *testing.T) string {
+func runMockBSRServer(t *testing.T) (string, *fileDescriptorSetServer) {
 	// load files into protoregistry.Files
 	mockResources := service.MockResources()
 	files, _, err := loadDescriptors(mockResources.FS(), []string{protosPath})
@@ -444,5 +453,5 @@ func runMockBSRServer(t *testing.T) string {
 		}
 	}()
 
-	return listener.Addr().String()
+	return listener.Addr().String(), fileDescriptorSetServer
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"buf.build/gen/go/bufbuild/reflect/connectrpc/go/buf/reflect/v1beta1/reflectv1beta1connect"
@@ -80,7 +81,7 @@ func newSchemaWatcher(ctx context.Context, bsrURL string, bsrAPIKey string, modu
 	if bsrAPIKey != "" {
 		opts = append(opts, connectrpc.WithInterceptors(prototransform.NewAuthInterceptor(bsrAPIKey)))
 	}
-	client := reflectv1beta1connect.NewFileDescriptorSetServiceClient(http.DefaultClient, bsrURL, opts...)
+	client := reflectv1beta1connect.NewFileDescriptorSetServiceClient(http.DefaultClient, bsrURL, opts...) //
 
 	cfg := &prototransform.SchemaWatcherConfig{
 		SchemaPoller: prototransform.NewSchemaPoller(
@@ -88,7 +89,10 @@ func newSchemaWatcher(ctx context.Context, bsrURL string, bsrAPIKey string, modu
 			module,
 			version,
 		),
-		Jitter: 0.2,
+		Jitter:        0.2,
+		PollingPeriod: 20 * time.Second,
+		Leaser:        sharedLeaser,
+		Cache:         sharedCache,
 	}
 	watcher, err := prototransform.NewSchemaWatcher(ctx, cfg)
 	if err != nil {
@@ -172,4 +176,86 @@ func (w *MultiModuleWatcher) FindEnumByName(enum protoreflect.FullName) (protore
 		return enumType, nil
 	}
 	return nil, fmt.Errorf("could not find %s in any loaded modules", enum)
+}
+
+var (
+	sharedLeaser = &bsrLeaser{}
+	sharedCache  = newBsrCache()
+)
+
+var (
+	mu           sync.Mutex
+	currentLease *bsrLease //
+	weHaveLease  bool      // <- STORE IN A CACHE
+)
+
+// cache key,value id,bool
+
+type bsrLeaser struct{}
+
+func (blr *bsrLeaser) NewLease(ctx context.Context, s string, id []byte) prototransform.Lease {
+	mu.Lock()
+	defer mu.Unlock()
+
+	fmt.Printf("NEW LEASE for sharedLeaser(%v)\n", &sharedLeaser)
+
+	// Does someone else have the lease?
+	// Yes: We return a lease that will return IsHeld() false
+	// No: We return a lease that will return IsHeld() true
+
+	if currentLease != nil {
+		fmt.Printf("RETURNING EXISTING CURRENT LEASE %v\n", &currentLease)
+		// we don't hold the lease now
+		weHaveLease = false // <- STORE IN A CACHE
+		return currentLease
+	} else {
+		currentLease = &bsrLease{}
+		fmt.Printf("CREATING CURRENT LEASE %v\n", &currentLease)
+		// we hold the lease now
+		weHaveLease = true // <- STORE IN A CACHE
+		return currentLease
+	}
+}
+
+type bsrLease struct{}
+
+func (bl bsrLease) IsHeld() (bool, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Does someone else have the lease?
+	// Yes: We return false
+	// No:
+	// - Then do we have the lease?
+	//   Yes: We return true
+	//    No: We try to obtain the lease
+
+	return weHaveLease, nil
+}
+
+func (bl bsrLease) SetCallbacks(func(), func()) {}
+func (bl bsrLease) Cancel()                     {}
+
+type bsrCache struct {
+	mu sync.RWMutex
+	c  map[string][]byte
+}
+
+func newBsrCache() *bsrCache {
+	return &bsrCache{c: make(map[string][]byte)}
+}
+
+func (bc *bsrCache) Load(ctx context.Context, key string) ([]byte, error) {
+	fmt.Printf("LOAD key: %v\n", key)
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.c[key], nil
+}
+
+func (bc *bsrCache) Save(ctx context.Context, key string, data []byte) error {
+	fmt.Printf("SAVE key: %v\n", key)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.c[key] = data
+	return nil
 }
