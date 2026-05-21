@@ -12,6 +12,7 @@ import (
 	"buf.build/gen/go/bufbuild/reflect/connectrpc/go/buf/reflect/v1beta1/reflectv1beta1connect"
 	connectrpc "connectrpc.com/connect"
 	"github.com/bufbuild/prototransform"
+	"github.com/gofrs/uuid"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 
@@ -184,12 +185,13 @@ var (
 )
 
 var (
-	mu           sync.Mutex
-	currentLease *bsrLease //
-	weHaveLease  bool      // <- STORE IN A CACHE
+	mu         sync.Mutex
+	leaseStore map[string]bool
 )
 
-// cache key,value id,bool
+func init() {
+	leaseStore = make(map[string]bool)
+}
 
 type bsrLeaser struct{}
 
@@ -197,42 +199,42 @@ func (blr *bsrLeaser) NewLease(ctx context.Context, s string, id []byte) prototr
 	mu.Lock()
 	defer mu.Unlock()
 
-	fmt.Printf("NEW LEASE for sharedLeaser(%v)\n", &sharedLeaser)
+	uuid, _ := uuid.NewV4()
 
-	// Does someone else have the lease?
-	// Yes: We return a lease that will return IsHeld() false
-	// No: We return a lease that will return IsHeld() true
+	leaseStore[uuid.String()] = false
 
-	if currentLease != nil {
-		fmt.Printf("RETURNING EXISTING CURRENT LEASE %v\n", &currentLease)
-		// we don't hold the lease now
-		weHaveLease = false // <- STORE IN A CACHE
-		return currentLease
-	} else {
-		currentLease = &bsrLease{}
-		fmt.Printf("CREATING CURRENT LEASE %v\n", &currentLease)
-		// we hold the lease now
-		weHaveLease = true // <- STORE IN A CACHE
-		return currentLease
-	}
+	return &bsrLease{id: uuid.String()}
 }
 
-type bsrLease struct{}
+type bsrLease struct {
+	id string
+}
 
+// Add a NewbsrLease func that will start a goroutine to monitor leaseholder
 func (bl bsrLease) IsHeld() (bool, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	// Does someone else have the lease?
-	// Yes: We return false
-	// No:
-	// - Then do we have the lease?
-	//   Yes: We return true
-	//    No: We try to obtain the lease
-
-	return weHaveLease, nil
+	var leaseHeld bool
+	for _, v := range leaseStore {
+		if v {
+			leaseHeld = true
+			break
+		}
+	}
+	if leaseHeld {
+		// Yes: We return a lease that will return IsHeld() false
+		leaseStore[bl.id] = false
+		return false, nil
+	} else {
+		// No: We return a lease that will return IsHeld() true
+		leaseStore[bl.id] = true
+		return true, nil
+	}
 }
 
+// add callbacks
 func (bl bsrLease) SetCallbacks(func(), func()) {}
 func (bl bsrLease) Cancel()                     {}
 
@@ -246,14 +248,12 @@ func newBsrCache() *bsrCache {
 }
 
 func (bc *bsrCache) Load(ctx context.Context, key string) ([]byte, error) {
-	fmt.Printf("LOAD key: %v\n", key)
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.c[key], nil
 }
 
 func (bc *bsrCache) Save(ctx context.Context, key string, data []byte) error {
-	fmt.Printf("SAVE key: %v\n", key)
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	bc.c[key] = data

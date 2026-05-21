@@ -40,5 +40,7 @@ bsr:
 
 	time.Sleep(time.Second * 20)
 
+	s.ccMutex.Lock()
+	defer s.ccMutex.Unlock()
 	assert.LessOrEqual(t, s.cc, 5)
 }
