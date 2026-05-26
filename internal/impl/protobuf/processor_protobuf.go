@@ -30,6 +30,7 @@ const (
 	fieldBSRUrl     = "url"
 	fieldBsrAPIKey  = "api_key"
 	fieldBsrVersion = "version"
+	fieldBsrCache   = "cache"
 )
 
 func protobufProcessorSpec() *service.ConfigSpec {
@@ -78,6 +79,9 @@ Attempts to create a target protobuf message from a generic JSON structure.
 				Default(""),
 			service.NewStringField(fieldBsrVersion).
 				Description("Version to retrieve from the Buf Schema Registry, leave blank for latest.").
+				Default("").Advanced(),
+			service.NewStringField(fieldBsrCache).
+				Description("use a []() cache to store the result ... TODO").
 				Default("").Advanced(),
 		).Description("Buf Schema Registry configuration. Either this field or `import_paths` must be populated. Note that this field is an array, and multiple BSR configurations can be provided.").
 			Default([]any{}),
@@ -508,6 +512,8 @@ func newProtobuf(conf *service.ParsedConfig, mgr *service.Resources) (*protobufP
 
 	// if BSR config is present, use BSR to discover proto definitions
 	if len(bsrModules) > 0 {
+		sharedLeaser = getBsrLeaser("foocache", mgr) // TODO - not going to work if there are multiple bsr configs with different caches
+		sharedCache = getBsrCache("foocache", mgr)   // TODO
 		p.multiModuleWatcher, err = newMultiModuleWatcher(bsrModules)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create MultiModuleWatcher: %w", err)

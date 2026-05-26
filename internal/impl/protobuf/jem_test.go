@@ -7,7 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/warpstreamlabs/bento/public/service"
+	"github.com/warpstreamlabs/bento/internal/component/testutil"
+	"github.com/warpstreamlabs/bento/internal/manager/mock"
 )
 
 // Too many calls to the buf schema registry.
@@ -21,20 +22,27 @@ func TestXxx(t *testing.T) {
 	mockBSRServerAddress, s := runMockBSRServer(t)
 	message := "testing.Envelope"
 
-	conf, err := protobufProcessorSpec().ParseYAML(fmt.Sprintf(`
-operator: from_json
-message: %v
-bsr:
-  - module: "testing"
-    url: %s
-`, message, "http://"+mockBSRServerAddress), nil)
+	mgr := mock.NewManager()
+	mgr.Caches["foocache"] = map[string]mock.CacheItem{}
+
+	conf, err := testutil.ProcessorFromYAML(fmt.Sprintf(`
+protobuf:
+  operator: from_json
+  message: %v
+  bsr:
+    - module: "testing"
+      url: %s
+      cache: foocache
+`, message, "http://"+mockBSRServerAddress))
 	require.NoError(t, err)
 
 	// create 100
-	legionOfProcessors := map[int]*protobufProc{}
+	legionOfProcessors := map[int]any{}
 	for i := range 100 {
-		p, err := newProtobuf(conf, service.MockResources())
+		p, err := mgr.NewProcessor(conf)
 		require.NoError(t, err)
+
+		fmt.Printf("i: %v, p: %T\n", i, p)
 		legionOfProcessors[i] = p
 	}
 

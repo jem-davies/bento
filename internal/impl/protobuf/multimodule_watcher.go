@@ -1,6 +1,7 @@
 package protobuf
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -55,7 +56,12 @@ func newMultiModuleWatcher(bsrModules []*service.ParsedConfig) (*MultiModuleWatc
 			return nil, err
 		}
 
-		watcher, err := newSchemaWatcher(context.Background(), bsrURL, bsrAPIKey, module, version)
+		var cache string
+		if cache, err = bsrModule.FieldString(fieldBsrCache); err != nil {
+			return nil, err
+		}
+
+		watcher, err := newSchemaWatcher(context.Background(), bsrURL, bsrAPIKey, module, version, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +71,7 @@ func newMultiModuleWatcher(bsrModules []*service.ParsedConfig) (*MultiModuleWatc
 	return multiModuleWatcher, nil
 }
 
-func newSchemaWatcher(ctx context.Context, bsrURL string, bsrAPIKey string, module string, version string) (*prototransform.SchemaWatcher, error) {
+func newSchemaWatcher(ctx context.Context, bsrURL, bsrAPIKey, module, version, cache string) (*prototransform.SchemaWatcher, error) {
 	// If no BSR url provided, extract from module
 	if bsrURL == "" {
 		segments := strings.Split(module, "/")
@@ -84,17 +90,31 @@ func newSchemaWatcher(ctx context.Context, bsrURL string, bsrAPIKey string, modu
 	}
 	client := reflectv1beta1connect.NewFileDescriptorSetServiceClient(http.DefaultClient, bsrURL, opts...) //
 
-	cfg := &prototransform.SchemaWatcherConfig{
-		SchemaPoller: prototransform.NewSchemaPoller(
-			client,
-			module,
-			version,
-		),
-		Jitter:        0.2,
-		PollingPeriod: 20 * time.Second,
-		Leaser:        sharedLeaser,
-		Cache:         sharedCache,
+	var cfg *prototransform.SchemaWatcherConfig
+	fmt.Printf("cache: %v\n", cache)
+	if cache == "" {
+		cfg = &prototransform.SchemaWatcherConfig{
+			SchemaPoller: prototransform.NewSchemaPoller(
+				client,
+				module,
+				version,
+			),
+			Jitter: 0.2,
+		}
+	} else {
+		cfg = &prototransform.SchemaWatcherConfig{
+			SchemaPoller: prototransform.NewSchemaPoller(
+				client,
+				module,
+				version,
+			),
+			Jitter:        0.2,
+			PollingPeriod: 20 * time.Second,
+			Leaser:        singleLeaser,
+			Cache:         singleCache,
+		}
 	}
+
 	watcher, err := prototransform.NewSchemaWatcher(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create schema watcher: %w", err)
@@ -179,83 +199,148 @@ func (w *MultiModuleWatcher) FindEnumByName(enum protoreflect.FullName) (protore
 	return nil, fmt.Errorf("could not find %s in any loaded modules", enum)
 }
 
-var (
-	sharedLeaser = &bsrLeaser{}
-	sharedCache  = newBsrCache()
-)
+//------------------------------------------------------------------------------
 
 var (
-	mu         sync.Mutex
-	leaseStore map[string]bool
+	sharedLeaser *bsrLeaser
+	sharedCache  *bsrCache
+	mu           sync.Mutex
+	leaserMu     sync.Mutex
 )
 
-func init() {
-	leaseStore = make(map[string]bool)
+type bsrLeaser struct {
+	cacheName string
+	mgr       *service.Resources
 }
 
-type bsrLeaser struct{}
+var singleLeaser *bsrLeaser
 
-func (blr *bsrLeaser) NewLease(ctx context.Context, s string, id []byte) prototransform.Lease {
+func getBsrLeaser(cacheName string, mgr *service.Resources) *bsrLeaser {
+	if singleLeaser == nil {
+		leaserMu.Lock()
+		defer leaserMu.Unlock()
+		if singleLeaser == nil {
+			fmt.Println("Creating singleton leaser now")
+			singleLeaser = &bsrLeaser{
+				cacheName: cacheName,
+				mgr:       mgr,
+			}
+		}
+	}
+
+	return singleLeaser
+}
+
+func (blr *bsrLeaser) NewLease(ctx context.Context, leaseName string, id []byte) prototransform.Lease {
 	mu.Lock()
 	defer mu.Unlock()
 
 	uuid, _ := uuid.NewV4()
 
-	leaseStore[uuid.String()] = false
+	exists := true
+	blr.mgr.AccessCache(context.Background(), blr.cacheName, func(c service.Cache) {
+		_, err := c.Get(context.Background(), leaseName)
+		if errors.Is(err, service.ErrKeyNotFound) {
+			fmt.Println("leaseName not found")
+			exists = false
+		} else if err != nil {
+			panic(err)
+		}
+	})
 
-	return &bsrLease{id: uuid.String()}
+	if !exists {
+		blr.mgr.AccessCache(context.Background(), blr.cacheName, func(c service.Cache) {
+			err := c.Add(context.Background(), leaseName, uuid.Bytes(), nil)
+			if err != nil {
+				panic(err)
+			}
+		})
+	}
+
+	// goroutine to check leaseholder status
+
+	return &bsrLease{id: uuid.Bytes(), mgr: singleLeaser.mgr, cacheName: blr.cacheName, leaseName: leaseName}
 }
 
 type bsrLease struct {
-	id string
+	id        []byte
+	mgr       *service.Resources
+	cacheName string
+	leaseName string
 }
 
-// Add a NewbsrLease func that will start a goroutine to monitor leaseholder
 func (bl bsrLease) IsHeld() (bool, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Does someone else have the lease?
-	var leaseHeld bool
-	for _, v := range leaseStore {
-		if v {
-			leaseHeld = true
-			break
+	var currentLeaseholder []byte
+	var err error
+	cerr := bl.mgr.AccessCache(context.Background(), bl.cacheName, func(c service.Cache) {
+		currentLeaseholder, err = c.Get(context.Background(), bl.leaseName)
+		if errors.Is(err, service.ErrKeyNotFound) {
+			fmt.Println("leaseName not found") //
+		} else if err != nil {
+			panic(err)
 		}
+	})
+	if cerr != nil {
+		panic(cerr)
 	}
-	if leaseHeld {
-		// Yes: We return a lease that will return IsHeld() false
-		leaseStore[bl.id] = false
-		return false, nil
-	} else {
-		// No: We return a lease that will return IsHeld() true
-		leaseStore[bl.id] = true
-		return true, nil
-	}
+
+	comp := bytes.Compare(currentLeaseholder, bl.id)
+
+	return comp == 0, nil
 }
 
 // add callbacks
 func (bl bsrLease) SetCallbacks(func(), func()) {}
 func (bl bsrLease) Cancel()                     {}
 
-type bsrCache struct {
-	mu sync.RWMutex
-	c  map[string][]byte
+var singleCache *bsrCache
+
+func getBsrCache(cacheName string, mgr *service.Resources) *bsrCache {
+	if singleCache == nil {
+		leaserMu.Lock()
+		defer leaserMu.Unlock()
+		if singleCache == nil {
+			fmt.Println("Creating singleton cache now")
+			singleCache = &bsrCache{
+				cacheName: cacheName,
+				mgr:       mgr,
+			}
+		}
+	}
+
+	return singleCache
 }
 
-func newBsrCache() *bsrCache {
-	return &bsrCache{c: make(map[string][]byte)}
+type bsrCache struct {
+	cacheName string
+	mgr       *service.Resources
 }
 
 func (bc *bsrCache) Load(ctx context.Context, key string) ([]byte, error) {
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	return bc.c[key], nil
+	var data []byte
+	var err error
+	cerr := bc.mgr.AccessCache(context.Background(), bc.cacheName, func(c service.Cache) {
+		data, err = c.Get(context.Background(), key)
+		if err != nil {
+			panic(err) // TODO
+		}
+	})
+	if cerr != nil {
+		return nil, cerr
+	}
+
+	return data, nil
 }
 
 func (bc *bsrCache) Save(ctx context.Context, key string, data []byte) error {
-	bc.mu.Lock()
-	defer bc.mu.Unlock()
-	bc.c[key] = data
+	bc.mgr.AccessCache(context.Background(), bc.cacheName, func(c service.Cache) {
+		err := c.Set(context.Background(), key, data, nil)
+		if err != nil {
+			panic(err) // TODO
+		}
+	})
 	return nil
 }
