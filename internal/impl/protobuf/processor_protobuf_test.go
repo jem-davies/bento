@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"buf.build/gen/go/bufbuild/reflect/connectrpc/go/buf/reflect/v1beta1/reflectv1beta1connect"
 	v1beta1 "buf.build/gen/go/bufbuild/reflect/protocolbuffers/go/buf/reflect/v1beta1"
@@ -22,6 +23,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
+	"github.com/warpstreamlabs/bento/internal/component/testutil"
+	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
@@ -396,6 +399,39 @@ protobuf:
 	}
 }
 
+func TestBufCache(t *testing.T) {
+	mockBSRServerAddress, s := runMockBSRServer(t)
+	message := "testing.Envelope"
+
+	mgr := mock.NewManager()
+	mgr.Caches["foocache"] = map[string]mock.CacheItem{}
+
+	conf, err := testutil.ProcessorFromYAML(fmt.Sprintf(`
+protobuf:
+  operator: from_json
+  message: %v
+  bsr:
+    - module: "testing"
+      url: %s
+      cache: foocache
+`, message, "http://"+mockBSRServerAddress))
+	require.NoError(t, err)
+
+	legionOfProcessors := map[int]any{}
+	for i := range 100 {
+		p, err := mgr.NewProcessor(conf)
+		require.NoError(t, err)
+
+		legionOfProcessors[i] = p
+	}
+
+	time.Sleep(time.Second * 20)
+
+	s.ccMutex.Lock()
+	defer s.ccMutex.Unlock()
+	assert.LessOrEqual(t, s.cc, 5)
+}
+
 type fileDescriptorSetServer struct {
 	fileDescriptorSet *descriptorpb.FileDescriptorSet
 
@@ -408,7 +444,6 @@ func (s *fileDescriptorSetServer) GetFileDescriptorSet(_ context.Context, reques
 	s.cc++
 	s.ccMutex.Unlock()
 
-	fmt.Printf("CALL TO GetFileDescriptorSet Number: %v\n", s.cc)
 	response := &v1beta1.GetFileDescriptorSetResponse{FileDescriptorSet: s.fileDescriptorSet, Version: request.Msg.GetVersion()}
 	return connect.NewResponse(response), nil
 }

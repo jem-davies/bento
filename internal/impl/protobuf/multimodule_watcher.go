@@ -91,7 +91,6 @@ func newSchemaWatcher(ctx context.Context, bsrURL, bsrAPIKey, module, version, c
 	client := reflectv1beta1connect.NewFileDescriptorSetServiceClient(http.DefaultClient, bsrURL, opts...) //
 
 	var cfg *prototransform.SchemaWatcherConfig
-	fmt.Printf("cache: %v\n", cache)
 	if cache == "" {
 		cfg = &prototransform.SchemaWatcherConfig{
 			SchemaPoller: prototransform.NewSchemaPoller(
@@ -220,7 +219,6 @@ func getBsrLeaser(cacheName string, mgr *service.Resources) *bsrLeaser {
 		leaserMu.Lock()
 		defer leaserMu.Unlock()
 		if singleLeaser == nil {
-			fmt.Println("Creating singleton leaser now")
 			singleLeaser = &bsrLeaser{
 				cacheName: cacheName,
 				mgr:       mgr,
@@ -241,7 +239,6 @@ func (blr *bsrLeaser) NewLease(ctx context.Context, leaseName string, id []byte)
 	blr.mgr.AccessCache(context.Background(), blr.cacheName, func(c service.Cache) {
 		_, err := c.Get(context.Background(), leaseName)
 		if errors.Is(err, service.ErrKeyNotFound) {
-			fmt.Println("leaseName not found")
 			exists = false
 		} else if err != nil {
 			panic(err)
@@ -263,13 +260,14 @@ func (blr *bsrLeaser) NewLease(ctx context.Context, leaseName string, id []byte)
 }
 
 type bsrLease struct {
-	id        []byte
-	mgr       *service.Resources
-	cacheName string
-	leaseName string
+	id                   []byte
+	mgr                  *service.Resources
+	cacheName            string
+	leaseName            string
+	onAcquire, onRelease func()
 }
 
-func (bl bsrLease) IsHeld() (bool, error) {
+func (bl *bsrLease) IsHeld() (bool, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -278,7 +276,6 @@ func (bl bsrLease) IsHeld() (bool, error) {
 	cerr := bl.mgr.AccessCache(context.Background(), bl.cacheName, func(c service.Cache) {
 		currentLeaseholder, err = c.Get(context.Background(), bl.leaseName)
 		if errors.Is(err, service.ErrKeyNotFound) {
-			fmt.Println("leaseName not found") //
 		} else if err != nil {
 			panic(err)
 		}
@@ -292,9 +289,10 @@ func (bl bsrLease) IsHeld() (bool, error) {
 	return comp == 0, nil
 }
 
-// add callbacks
-func (bl bsrLease) SetCallbacks(func(), func()) {}
-func (bl bsrLease) Cancel()                     {}
+func (bl *bsrLease) SetCallbacks(onAcquire, onRelease func()) {
+}
+
+func (bl *bsrLease) Cancel() {}
 
 var singleCache *bsrCache
 
@@ -303,7 +301,6 @@ func getBsrCache(cacheName string, mgr *service.Resources) *bsrCache {
 		leaserMu.Lock()
 		defer leaserMu.Unlock()
 		if singleCache == nil {
-			fmt.Println("Creating singleton cache now")
 			singleCache = &bsrCache{
 				cacheName: cacheName,
 				mgr:       mgr,
@@ -325,7 +322,7 @@ func (bc *bsrCache) Load(ctx context.Context, key string) ([]byte, error) {
 	cerr := bc.mgr.AccessCache(context.Background(), bc.cacheName, func(c service.Cache) {
 		data, err = c.Get(context.Background(), key)
 		if err != nil {
-			panic(err) // TODO
+			panic(err)
 		}
 	})
 	if cerr != nil {
@@ -339,7 +336,7 @@ func (bc *bsrCache) Save(ctx context.Context, key string, data []byte) error {
 	bc.mgr.AccessCache(context.Background(), bc.cacheName, func(c service.Cache) {
 		err := c.Set(context.Background(), key, data, nil)
 		if err != nil {
-			panic(err) // TODO
+			panic(err)
 		}
 	})
 	return nil

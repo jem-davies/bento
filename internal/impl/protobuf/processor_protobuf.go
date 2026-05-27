@@ -547,3 +547,15 @@ func (p *protobufProc) Process(ctx context.Context, msg *service.Message) (servi
 func (p *protobufProc) Close(context.Context) error {
 	return nil
 }
+
+func (p *protobufProc) setOnAquire() func() {
+	return func() {
+		p.log.Info("Aquired lease for ???")
+	}
+}
+
+func (p *protobufProc) setOnRelease() func() {
+	return func() {
+		p.log.Info("Released lease for ???")
+	}
+}
