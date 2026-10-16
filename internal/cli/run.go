@@ -106,6 +106,12 @@ func runFlags(opts *common.CLIOpts) []cli.Flag {
 			Aliases: []string{"s"},
 			Usage:   "set a field (identified by a dot path) in the main configuration file, e.g. `\"metrics.type=prometheus\"`",
 		},
+		&cli.StringFlag{
+			Name:    "remote_config",
+			Aliases: []string{"rc"},
+			Value:   "",
+			Usage:   "a path to a file describing an HTTP request used to fetch the main configuration, using the same fields as the http_client input",
+		},
 		&cli.StringSliceFlag{
 			Name:    "resources",
 			Aliases: []string{"r"},

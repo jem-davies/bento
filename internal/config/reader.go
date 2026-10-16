@@ -61,6 +61,10 @@ type Reader struct {
 	overrides        []string
 	ConfigFromEnvVar string
 
+	// Path to a file describing the HTTP request used to fetch the main config
+	// from a remote source.
+	remoteConfigPath string
+
 	modTimeLastRead map[string]time.Time
 
 	// Controls whether the main config should include input, output, etc.
@@ -190,6 +194,44 @@ func OptLoadFromEnvVar(config string) OptFunc {
 	return func(r *Reader) {
 		r.ConfigFromEnvVar = config
 	}
+}
+
+// OptLoadFromRemote will configure the reader to fetch the main config over
+// HTTP, where path is a file describing the request to make.
+func OptLoadFromRemote(path string) OptFunc {
+	return func(r *Reader) {
+		r.remoteConfigPath = path
+	}
+}
+
+//------------------------------------------------------------------------------
+
+// RemoteConfigFetcher takes the contents of a remote config request file and
+// returns the fetched config bytes.
+type RemoteConfigFetcher func(ctx context.Context, specBytes []byte) ([]byte, error)
+
+var remoteConfigFetcher RemoteConfigFetcher
+
+// SetRemoteConfigFetcher registers the implementation used to fetch remote
+// configs. This is set by the internal/httpclient package, which cannot be
+// imported from here without creating an import cycle.
+func SetRemoteConfigFetcher(fn RemoteConfigFetcher) {
+	remoteConfigFetcher = fn
+}
+
+func (r *Reader) readRemoteConfig() ([]byte, []docs.Lint, error) {
+	if remoteConfigFetcher == nil {
+		return nil, nil, errors.New("remote config is not supported in this build")
+	}
+	specBytes, dLints, _, err := ReadFileEnvSwap(r.fs, r.remoteConfigPath, os.LookupEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	confBytes, err := remoteConfigFetcher(context.Background(), specBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%v: %w", r.remoteConfigPath, err)
+	}
+	return confBytes, dLints, nil
 }
 
 //------------------------------------------------------------------------------
@@ -324,6 +366,17 @@ func (r *Reader) readMain(mainPath string) (conf Type, pConf *docs.ParsedConfig,
 		}
 	} else if r.ConfigFromEnvVar != "" {
 		if confBytes, dLints, err = ReadBentoConfigEnvVarEnvSwap(r.ConfigFromEnvVar, os.LookupEnv); err != nil {
+			return
+		}
+		for _, l := range dLints {
+			lints = append(lints, l.Error())
+		}
+
+		if rawNode, err = docs.UnmarshalYAML(confBytes); err != nil {
+			return
+		}
+	} else if r.remoteConfigPath != "" {
+		if confBytes, dLints, err = r.readRemoteConfig(); err != nil {
 			return
 		}
 		for _, l := range dLints {
