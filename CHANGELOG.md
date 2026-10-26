@@ -3,6 +3,134 @@ Changelog
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Changed
+
+ - Shutdown timeouts that may cause duplicate delivery are now logged at `WARN` instead of `INFO` @piratecarrot
+
+## 1.22.0 - 2026-10-09
+
+### Added
+
+ - `statsd` metric new fields: `send_queue_capacity`, `buf_pool_capacity` & `send_loop_count` @triddell
+ - `credentials` object to GCP components with fields `impersonate_service_account` & `impersonate_delegates` @NguyenThanhDat741862
+ - `kafka_franz` components now include `GSSAPI` (kerberos) in available `sasl.mechanism` options @kmetaxas
+ - `redis_scan` input can now handle hash values with additional Bento config fields: `data_type`, `value_format`, `scan_count`, `hash_scan_count` @maxtheaxe
+ - `mqtt_v5` experimental input & output components enabling Bento to send/receive MQTT 5 messages @ifnesi
+ - `prefix` field added to `aws_s3` and `gcp_cloud_storage` caches enabling multiple caches to share a bucket, scoping all operations including key listings @ecordell
+ - `aws_sqs` input field `visibility_timeout` (default `30s`); set to `0` to use the queue's own timeout @ReguiguiMohamed
+ - `DATE` & `TIMESTAMP_MILLIS` type options added to `parquet_encode` processor @triddell
+ - `parse_bytes` bloblang method for parsing humanised byte sizes (such as `10MB` or `20MiB`) into an integer number of bytes @SJ1397
+ - `prefix_metadata_keys` added to `http_server` input enables prefixing metadata with the source i.e. header_, path_ @kshivam4781
+ - `azure_queue_storage` input field `delete_message`, defaulting to `true`, which can be set to `false` to leave acknowledged messages on the queue @istairbn
+
+### Fixed
+
+ - YAML merge keys `<<: *ref_field` are now resolved when running streams, aligning behaviour with the `lint` subcommand @youdie006
+ - `mongodb` cache operator `exists` correctly handling `mongo.ErrNoDocuments` & non-bytes return type @gregfurman
+ - `gcp_bigquery_write_api` output's `batching.byte_size` lint rule triggered at 1 MB while claiming a 10 MB limit, incorrectly flagging valid batch configurations well under BigQuery's actual `AppendRows` request size limit @SJ1397
+ - `aws_kinesis` input stop duplicate EFO shard consumers accumulating under backpressure @matus-tomlein
+ - `fsevent` reconnect on watcher error instead of stalling @henrikschristensen
+ - `azure_queue_storage` input deleted messages on nack, losing them; nacked messages are now left on the queue and redelivered once their visibility timeout expires @istairbn
+ - `kafka_franz` sends sasl extensions when oauth2 is enabled @bgajdzis-pentaleap
+ - Inputs that automatically retry nacked messages could stay blocked on shutdown when a read was cancelled during the retry backoff @ReguiguiMohamed
+ - `aws_sqs` input looked for the queue's `VisibilityTimeout` on each message, which `ReceiveMessage` never returns, so in-flight messages could not be refreshed with anything but 30s @ReguiguiMohamed
+
+### Changed
+
+ - `nats_kv` output & cache migrated to new jetstream package & connection retry logic (increased frequency of retries & indefinite number of retries) @henrikschristensen
+
+## 1.21.2 - 2026-09-11 
+
+### Changed
+
+ - Updated to Go version 1.27.1 @gregfurman
+ - migrated MSSQL driver to official microsoft/go-mssqldb @cmelanson
+ - upgraded apache/pulsar client to v0.21.0 @slachiewicz
+ - upgraded gosnowflake to v2 @jem-davies
+
+### Fixed
+
+- `aws_kinesis` input with `enhanced_fan_out` no longer accumulates duplicate shard consumers when the pipeline applies sustained backpressure, which previously grew memory usage until the process was killed @matus-tomlein
+
+## 1.21.1 - 2026-08-26
+
+### Fixed
+
+- `kafka_franz` output field `broker_write_max_bytes` misconfigured (introduced in version 1.21.0) @jem-davies
+
+## 1.21.0 - 2026-08-21
+
+### Added
+
+- Optional `Keys` method for caches enabling consumers of cache resources to enumerate keys, caches that do not support key listing yield `ErrKeyListingNotSupported` @ecordell
+- `memory`, `file`, `aws_s3` and `gcp_cloud_storage` caches support `Keys` @ecordell
+- `bucket` field on `aws_s3` output supports bloblang interpolation @jem-davies
+- Cache operation `exists` which checks caches for keys @lublak
+- `extract_tracing_map` and `new_root_span_with_link` on the `gcp_pubsub` input & `inject_tracing_map` on the `gcp_pubsub` output @jesperanzasolo
+- `transaction_isolation_level` field to `kafka` & `kafka_franz` components @mbuckley2000
+- `send_ack` field on `nats` input enables/disables sending acknowledgement back to nats' input subject reply address @ahart97
+- Optional ListableCache interface for caches that support key listing - with implementations for `memory`, `file`, `aws_s3` & `gcp_cloud_storage`
+- `broker_read_max_bytes` to `kafka_franz` input and `broker_write_max_bytes` & `max_buffered_bytes` options to `kafka_franz` output @jem-davies
+
+### Fixed
+
+- `parse_big_decimal` rejects scales above 16383 to avoid unbounded big-integer work @aratz-lasa
+- stale buffer example path in internal/impl README @youdie006
+- `fsevent` preserves file create events when watching new subdirs @mattfaltyn
+- `aws_s3_stream` handles files smaller than S3's minimum multipart size @triddell
+
+### Changed
+
+- `apache/pulsar-client-go` updated to v0.21.0, picking up fixes for a consumer busy-spin deadlock, a connection panic on close, and a race that dropped messages before handler registration @slachiewicz
+
+### Security
+
+- **Breaking:** Addressed [GO-2026-5048](https://github.com/advisories/GHSA-mx64-mj3q-7prj) by replacing `github.com/hamba/avro/v2` with `github.com/iskorotkov/avro/v2`, temporarily disabling `go install github.com/warpstreamlabs/bento/cmd/bento@<version>` due to `replace` directive usage.
+- bump Go version to 1.26.6 to fix various CVEs in the standard library @jem-davies
+
+## 1.20.0 - 2026-07-27
+
+### Added
+
+- `parse_big_decimal` bloblang method for Kafka Connect / Debezium decimal decoding @aratz-lasa
+- `aws_bedrock_invoke` processor for invoking Amazon Bedrock models @louisdvs & @gregfurman
+
+### Fixed 
+
+- Fixed keyless records in the `kafka_franz` components being routed to a single partition @jem-davies
+- `batchErr` mutex locking in the `elasticsearch_v2` output @jem-davies
+- updated various dependencies to address CVEs 
+
+## 1.19.0 - 2026-07-10
+
+### Added
+
+ - `grpc_client` input component @jem-davies
+ - `sync_response` added to nats input NATS @henrikschristensen
+ - `endpoint` config option added to `gcp_bigquery` output @Shareed2k
+ - RLE_DICTIONARY support to `parquet` default encoding @georgeTobia
+ - `elasticsearch` processor @Omar1H1
+ - `json_number_type` config option added to `aws_dynamodb` output enables JSON numbers to be either stored as dynamoDB Strings / Numbers @cthorner
+ - `negotiate` config options added to `http` components to enable SPNEGO auth @lublak
+ - `timestamp` field added to `gcp_bigtable` enabling setting timestamps @gregfurman
+ - `restart_backoff` fields added to `read_until` input enable setting a backoff policy for when the child input restarts @aramperes
+
+### Fixed
+
+ - `aws_dynamodb` output no longer drops successfully-built messages when another message in the batch fails request construction @cthorner
+ - `aws_kinesis` assign msgChan after succesful connection @richardartoul
+ - `aws_kinesis` input fixed a nil pointer panic when `ListShards` returned an error @richardartoul
+ - `aws_kinesis` input fixed `ListShards` pagination error @gregfurman
+ - `omit_if_empty` config option added to `aws_dynamodb` enabling the correction of previously documented behaviour that missing paths are omitted rather than written as null @cthorner
+ - `aws_kinesis` input fixed shard consumer busy-loop and excess timer allocations noticible at high shard counts @richardartoul
+ - `schema_registry_decode` & `schema_registry_encode` fixed for schema's whose subject contained a `/` @PitchBlack07
+
+### Changed
+
+ - `aws_kinesis` input simplified EFO architecture to align with Amazon's Kinesis Client @matus-tomlein
+
 ## 1.18.1 - 2026-06-05
 
 ### Fixed

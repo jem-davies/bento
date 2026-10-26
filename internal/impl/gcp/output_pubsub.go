@@ -74,6 +74,7 @@ pipeline:
 			service.NewMetadataExcludeFilterField("metadata").
 				Optional().
 				Description("Specify criteria for which metadata values are sent as attributes, all are sent by default."),
+			service.NewInjectTracingSpanMappingField(),
 			service.NewObjectField(
 				"flow_control",
 				service.NewIntField("max_outstanding_bytes").
@@ -90,6 +91,7 @@ pipeline:
 				Advanced(),
 			service.NewBatchPolicyField("batching").
 				Description("Configures a batching policy on this output. While the PubSub client maintains its own internal buffering mechanism, preparing larger batches of messages can further trade-off some latency for throughput."),
+			gcpCredentialsField(),
 		)
 }
 
@@ -177,9 +179,12 @@ func newPubSubOutput(conf *service.ParsedConfig) (*pubsubOutput, error) {
 		return nil, err
 	}
 
-	var opt []option.ClientOption
+	opt, err := gcpClientOptionsFromParsed(conf)
+	if err != nil {
+		return nil, err
+	}
 	if endpoint != "" {
-		opt = []option.ClientOption{option.WithEndpoint(endpoint)}
+		opt = append(opt, option.WithEndpoint(endpoint))
 	}
 
 	return &pubsubOutput{
@@ -360,7 +365,11 @@ func init() {
 			return
 		}
 
-		out, err = newPubSubOutput(conf)
+		if out, err = newPubSubOutput(conf); err != nil {
+			return
+		}
+
+		out, err = conf.WrapBatchOutputExtractTracingSpanMapping("gcp_pubsub", out)
 
 		return
 	}); err != nil {

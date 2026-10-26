@@ -55,6 +55,11 @@ input:
     create_subscription:
       enabled: false
       topic: ""
+    extract_tracing_map: root = @ # No default (optional)
+    new_root_span_with_link: false # No default (optional)
+    credentials:
+      impersonate_service_account: ""
+      impersonate_delegates: []
 ```
 
 </TabItem>
@@ -155,5 +160,59 @@ Defines the topic that the subscription should be vinculated to.
 
 Type: `string`  
 Default: `""`  
+
+### `extract_tracing_map`
+
+EXPERIMENTAL: A [Bloblang mapping](/docs/guides/bloblang/about) that attempts to extract an object containing tracing propagation information, which will then be used as the root tracing span for the message. The specification of the extracted fields must match the format used by the service wide tracer.
+
+
+Type: `string`  
+Requires version 1.21.0 or newer  
+
+```yml
+# Examples
+
+extract_tracing_map: root = @
+
+extract_tracing_map: root = this.meta.span
+```
+
+### `new_root_span_with_link`
+
+EXPERIMENTAL: Starts a new root span with link to parent.
+
+
+Type: `bool`  
+Requires version 1.21.0 or newer  
+
+### `credentials`
+
+Optional manual configuration of GCP credentials to use. More information can be found [in this document](/docs/guides/cloud/gcp).
+
+
+Type: `object`  
+Requires version 1.22.0 or newer  
+
+### `credentials.impersonate_service_account`
+
+The email address of a service account to impersonate. The base credentials (Application Default Credentials) must be granted `roles/iam.serviceAccountTokenCreator` on this service account, or on the first delegate when `impersonate_delegates` is set.
+
+
+Type: `string`  
+Default: `""`  
+
+```yml
+# Examples
+
+impersonate_service_account: target@my-project.iam.gserviceaccount.com
+```
+
+### `credentials.impersonate_delegates`
+
+An optional chain of service account email addresses to delegate through when impersonating. Each service account must be granted `roles/iam.serviceAccountTokenCreator` on the next service account in the chain, with the final one granted on `impersonate_service_account`.
+
+
+Type: `array`  
+Default: `[]`  
 
 

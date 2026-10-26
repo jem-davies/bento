@@ -34,6 +34,7 @@ type pbiConfig struct {
 	Sync                   bool
 	CreateEnabled          bool
 	CreateTopicID          string
+	ClientOptions          []option.ClientOption
 }
 
 func pbiConfigFromParsed(pConf *service.ParsedConfig) (conf pbiConfig, err error) {
@@ -63,6 +64,9 @@ func pbiConfigFromParsed(pConf *service.ParsedConfig) (conf pbiConfig, err error
 		if conf.CreateTopicID, err = createConf.FieldString(pbiFieldCreateSubTopicID); err != nil {
 			return
 		}
+	}
+	if conf.ClientOptions, err = gcpClientOptionsFromParsed(pConf); err != nil {
+		return
 	}
 	return
 }
@@ -117,6 +121,9 @@ You can access these metadata fields using [function interpolation](/docs/config
 			).
 				Description("Allows you to configure the input subscription and creates if it doesn't exist.").
 				Advanced(),
+			service.NewExtractTracingSpanMappingField().Version("1.21.0"),
+			service.NewRootSpanWithLinkField().Version("1.21.0"),
+			gcpCredentialsField(),
 		)
 }
 
@@ -127,7 +134,11 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return newGCPPubSubReader(pConf, mgr)
+			r, err := newGCPPubSubReader(pConf, mgr)
+			if err != nil {
+				return nil, err
+			}
+			return conf.WrapInputExtractTracingSpanMapping("gcp_pubsub", r)
 		})
 	if err != nil {
 		panic(err)
@@ -172,9 +183,9 @@ type gcpPubSubReader struct {
 }
 
 func newGCPPubSubReader(conf pbiConfig, res *service.Resources) (*gcpPubSubReader, error) {
-	var opt []option.ClientOption
+	opt := conf.ClientOptions
 	if strings.TrimSpace(conf.Endpoint) != "" {
-		opt = []option.ClientOption{option.WithEndpoint(conf.Endpoint)}
+		opt = append(opt, option.WithEndpoint(conf.Endpoint))
 	}
 
 	client, err := pubsub.NewClient(context.Background(), conf.ProjectID, opt...)

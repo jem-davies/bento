@@ -247,6 +247,18 @@ type kinesisReader struct {
 	cMut    sync.Mutex
 	msgChan chan asyncMessage
 
+	// runningShards tracks the shards this client currently has a consumer
+	// goroutine for, keyed by streamID+shardID. The balancer consults it before
+	// claiming a shard so that a lease which looks stale — most often because
+	// the consumer is blocked waiting for a busy pipeline — cannot cause a
+	// second consumer to be started for a shard we are already consuming.
+	runningMut    sync.Mutex
+	runningShards map[string]struct{}
+
+	// checkpointFn overrides the periodic checkpoint call in tests. Nil in
+	// production, where the real checkpointer is used.
+	checkpointFn func(ctx context.Context, streamID, shardID, sequence string) (bool, error)
+
 	ctx  context.Context
 	done func()
 
@@ -255,6 +267,66 @@ type kinesisReader struct {
 }
 
 var errCannotMixBalancedShards = errors.New("it is not currently possible to include balanced and explicit shard streams in the same kinesis input")
+
+func shardKey(streamID, shardID string) string {
+	return streamID + "/" + shardID
+}
+
+// claimRunningShard registers a shard as being consumed by this client,
+// reporting false if a consumer for it is already running.
+func (k *kinesisReader) claimRunningShard(streamID, shardID string) bool {
+	key := shardKey(streamID, shardID)
+	k.runningMut.Lock()
+	defer k.runningMut.Unlock()
+	if _, exists := k.runningShards[key]; exists {
+		return false
+	}
+	k.runningShards[key] = struct{}{}
+	return true
+}
+
+// releaseRunningShard deregisters a shard once its consumer goroutine exits.
+func (k *kinesisReader) releaseRunningShard(streamID, shardID string) {
+	k.runningMut.Lock()
+	delete(k.runningShards, shardKey(streamID, shardID))
+	k.runningMut.Unlock()
+}
+
+// isShardRunning reports whether this client already has a consumer goroutine
+// for the given shard.
+func (k *kinesisReader) isShardRunning(streamID, shardID string) bool {
+	k.runningMut.Lock()
+	defer k.runningMut.Unlock()
+	_, exists := k.runningShards[shardKey(streamID, shardID)]
+	return exists
+}
+
+// startConsumer starts the appropriate consumer for a shard, guarding against
+// starting a second consumer for a shard this client is already consuming. It
+// takes ownership of the wait group increment, releasing it if the consumer is
+// not started.
+func (k *kinesisReader) startConsumer(wg *sync.WaitGroup, info streamInfo, shardID, sequence string) error {
+	if !k.claimRunningShard(info.id, shardID) {
+		k.log.Debugf(
+			"Skipping consumer for stream '%v' shard '%v': this client is already consuming it",
+			info.id, shardID,
+		)
+		wg.Done()
+		return nil
+	}
+
+	var err error
+	if k.efoEnabled {
+		err = k.runEFOConsumer(wg, info, shardID, sequence)
+	} else {
+		err = k.runConsumer(wg, info, shardID, sequence)
+	}
+	if err != nil {
+		// The consumer never started, so nothing will deregister it.
+		k.releaseRunningShard(info.id, shardID)
+	}
+	return err
+}
 
 func newKinesisReaderFromParsed(pConf *service.ParsedConfig, mgr *service.Resources) (*kinesisReader, error) {
 	conf, err := kinesisInputConfigFromParsed(pConf)
@@ -296,12 +368,13 @@ func newKinesisReaderFromConfig(conf kiConfig, batcher service.BatchPolicy, sess
 	}
 
 	k := kinesisReader{
-		conf:       conf,
-		sess:       sess,
-		batcher:    batcher,
-		log:        mgr.Logger(),
-		mgr:        mgr,
-		closedChan: make(chan struct{}),
+		conf:          conf,
+		sess:          sess,
+		batcher:       batcher,
+		log:           mgr.Logger(),
+		mgr:           mgr,
+		closedChan:    make(chan struct{}),
+		runningShards: map[string]struct{}{},
 	}
 	k.ctx, k.done = context.WithCancel(context.Background())
 
@@ -519,12 +592,24 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, info streamInfo, shardID
 	var nextFlushChan chan<- asyncMessage
 	commitCtx, commitCtxClose := context.WithTimeout(k.ctx, k.commitPeriod)
 
+	// Reusable timers backing nextTimedBatchChan and nextPullChan. Reusing
+	// timers rather than calling time.After on every empty poll avoids
+	// allocating a new runtime timer per iteration, which is significant when
+	// running thousands of shard consumers.
+	timedBatchTimer := time.NewTimer(time.Hour)
+	timedBatchTimer.Stop()
+	pullTimer := time.NewTimer(time.Hour)
+	pullTimer.Stop()
+
 	go func() {
 		defer func() {
 			commitCtxClose()
+			timedBatchTimer.Stop()
+			pullTimer.Stop()
 			recordBatcher.Close(context.Background(), state == awsKinesisConsumerFinished)
 			boff.Reset()
 			k.boffPool.Put(boff)
+			k.releaseRunningShard(info.id, shardID)
 
 			reason := ""
 			switch state {
@@ -565,10 +650,10 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, info streamInfo, shardID
 			if state == awsKinesisConsumerConsuming && len(pending) == 0 && nextPullChan == unblockedChan {
 				if pending, iter, err = k.getRecords(info, shardID, iter); err != nil {
 					if !awsErrIsTimeout(err) {
-						nextPullChan = time.After(boff.NextBackOff())
+						pullTimer.Reset(boff.NextBackOff())
+						nextPullChan = pullTimer.C
 
-						var aerr *types.ExpiredIteratorException
-						if errors.As(err, &aerr) {
+						if _, ok := errors.AsType[*types.ExpiredIteratorException](err); ok {
 							k.log.Warn("Shard iterator expired, attempting to refresh")
 							newIter, err := k.getIter(info, shardID, recordBatcher.GetSequence())
 							if err != nil {
@@ -581,7 +666,8 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, info streamInfo, shardID
 						}
 					}
 				} else if len(pending) == 0 {
-					nextPullChan = time.After(boff.NextBackOff())
+					pullTimer.Reset(boff.NextBackOff())
+					nextPullChan = pullTimer.C
 				} else {
 					boff.Reset()
 					nextPullChan = blockedChan
@@ -636,9 +722,22 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, info streamInfo, shardID
 			if nextTimedBatchChan == nil {
 				if tNext, exists := recordBatcher.UntilNext(); exists {
 					if len(pending) > 0 || recordBatcher.HasPendingMessage() {
-						nextTimedBatchChan = time.After(tNext)
+						timedBatchTimer.Reset(tNext)
+						nextTimedBatchChan = timedBatchTimer.C
 					}
 				}
+			}
+
+			// If we have a message ready for dispatch but the pipeline isn't
+			// keeping up then nextPullChan may be set to the permanently
+			// unblocked (closed) channel, in which case the select below would
+			// never block and this loop would spin hot without making any
+			// progress. Falling through the select is only productive when it
+			// leads to pulling more records, so suppress the pull case until
+			// the pending message has been flushed.
+			pullChan := nextPullChan
+			if pendingMsg.msg != nil && pullChan == unblockedChan {
+				pullChan = blockedChan
 			}
 
 			select {
@@ -664,7 +763,7 @@ func (k *kinesisReader) runConsumer(wg *sync.WaitGroup, info streamInfo, shardID
 				nextTimedBatchChan = nil
 			case nextFlushChan <- pendingMsg:
 				pendingMsg = asyncMessage{}
-			case <-nextPullChan:
+			case <-pullChan:
 				nextPullChan = unblockedChan
 			case <-k.ctx.Done():
 				state = awsKinesisConsumerClosing
@@ -689,11 +788,18 @@ func isShardFinished(s types.Shard) bool {
 
 func collectShards(ctx context.Context, arn string, svc *kinesis.Client) ([]types.Shard, error) {
 	listShardFn := func(token *string) ([]types.Shard, *string, error) {
+		var streamARN *string
+		if token == nil {
+			streamARN = aws.String(arn)
+		}
 		shardsRes, err := svc.ListShards(ctx, &kinesis.ListShardsInput{
-			StreamARN: aws.String(arn),
+			StreamARN: streamARN,
 			NextToken: token,
 		})
-		return shardsRes.Shards, shardsRes.NextToken, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return shardsRes.Shards, shardsRes.NextToken, nil
 	}
 
 	shardIter := helper.TokenIterator(listShardFn)
@@ -753,6 +859,12 @@ func (k *kinesisReader) runBalancedShards() {
 			// Have a go at grabbing any unclaimed shards
 			if len(unclaimedShards) > 0 {
 				for shardID, clientID := range unclaimedShards {
+					// A shard we are already consuming is not up for grabs,
+					// even if its lease looks stale — the consumer is most
+					// likely blocked on a busy pipeline rather than dead.
+					if k.isShardRunning(info.id, shardID) {
+						continue
+					}
 					sequence, err := k.checkpointer.Claim(k.ctx, info.id, shardID, clientID)
 					if err != nil {
 						if k.ctx.Err() != nil {
@@ -764,12 +876,7 @@ func (k *kinesisReader) runBalancedShards() {
 						continue
 					}
 					wg.Add(1)
-					if k.efoEnabled {
-						err = k.runEFOConsumer(&wg, *info, shardID, sequence)
-					} else {
-						err = k.runConsumer(&wg, *info, shardID, sequence)
-					}
-					if err != nil {
+					if err := k.startConsumer(&wg, *info, shardID, sequence); err != nil {
 						k.log.Errorf("Failed to start consumer: %v\n", err)
 					}
 				}
@@ -818,12 +925,7 @@ func (k *kinesisReader) runBalancedShards() {
 						info.id, randomShard, clientID, k.clientID,
 					)
 					wg.Add(1)
-					if k.efoEnabled {
-						err = k.runEFOConsumer(&wg, *info, randomShard, sequence)
-					} else {
-						err = k.runConsumer(&wg, *info, randomShard, sequence)
-					}
-					if err != nil {
+					if err := k.startConsumer(&wg, *info, randomShard, sequence); err != nil {
 						k.log.Errorf("Failed to start consumer: %v\n", err)
 					} else {
 						// If we successfully stole the shard then that's enough
@@ -864,11 +966,7 @@ func (k *kinesisReader) runExplicitShards() {
 				sequence, err := k.checkpointer.Claim(k.ctx, id, shardID, "")
 				if err == nil {
 					wg.Add(1)
-					if k.efoEnabled {
-						err = k.runEFOConsumer(&wg, info, shardID, sequence)
-					} else {
-						err = k.runConsumer(&wg, info, shardID, sequence)
-					}
+					err = k.startConsumer(&wg, info, shardID, sequence)
 				}
 				if err != nil {
 					if k.ctx.Err() != nil {
@@ -939,7 +1037,6 @@ func (k *kinesisReader) Connect(ctx context.Context) error {
 
 	k.svc = svc
 	k.checkpointer = checkpointer
-	k.msgChan = make(chan asyncMessage)
 
 	if err = k.waitUntilStreamsExists(ctx); err != nil {
 		return err
@@ -964,6 +1061,14 @@ func (k *kinesisReader) Connect(ctx context.Context) error {
 			k.log.Debugf("Enhanced Fan Out consumer registered for stream %s with ARN: %s", stream.id, consumerARN)
 		}
 	}
+
+	// Only assign msgChan once everything above has succeeded, since a non-nil
+	// msgChan is what marks this reader as connected. Assigning it earlier
+	// meant a failure in the steps above left the reader permanently "connected"
+	// but without a running shard consumer, so subsequent Connect calls
+	// returned nil and ReadBatch blocked forever on a channel nothing writes
+	// to.
+	k.msgChan = make(chan asyncMessage)
 
 	if len(k.streams[0].explicitShards) > 0 {
 		go k.runExplicitShards()
@@ -998,6 +1103,17 @@ func (k *kinesisReader) ReadBatch(ctx context.Context) (service.MessageBatch, se
 // CloseAsync shuts down the Kinesis input and stops processing requests.
 func (k *kinesisReader) Close(ctx context.Context) error {
 	k.done()
+
+	k.cMut.Lock()
+	if k.msgChan == nil {
+		// Connect never completed successfully, so there is no shard runner
+		// goroutine responsible for closing closedChan on our behalf.
+		k.closeOnce.Do(func() {
+			close(k.closedChan)
+		})
+	}
+	k.cMut.Unlock()
+
 	select {
 	case <-k.closedChan:
 	case <-ctx.Done():

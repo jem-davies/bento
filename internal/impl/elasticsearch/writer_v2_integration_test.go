@@ -11,9 +11,10 @@ import (
 	"time"
 
 	goEs "github.com/elastic/go-elasticsearch/v9"
-	"github.com/ory/dockertest/v3"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/warpstreamlabs/bento/internal/impl/elasticsearch"
 	"github.com/warpstreamlabs/bento/public/service"
 	"github.com/warpstreamlabs/bento/public/service/integration"
@@ -34,28 +35,22 @@ func TestIntegrationWriterV2(t *testing.T) {
 	integration.CheckSkip(t)
 	t.Parallel()
 
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Skipf("Could not connect to docker: %s", err)
-	}
-	pool.MaxWait = time.Minute * 3
+	pool := dockertest.NewPoolT(t, "", dockertest.WithMaxWait(time.Minute))
 
-	resource, err := pool.Run("elasticsearch", "8.16.5", []string{
-		"discovery.type=single-node",
-		"xpack.security.enabled=false",
-		"xpack.security.transport.ssl.enabled=false",
-		"xpack.security.http.ssl.enabled=false",
-		"ES_JAVA_OPTS=-Xms512m -Xmx512m",
-	})
+	resource, err := pool.Run(t.Context(), "elasticsearch",
+		dockertest.WithTag("8.16.5"),
+		dockertest.WithEnv([]string{
+			"discovery.type=single-node",
+			"xpack.security.enabled=false",
+			"xpack.security.transport.ssl.enabled=false",
+			"xpack.security.http.ssl.enabled=false",
+			"ES_JAVA_OPTS=-Xms512m -Xmx512m",
+		}),
+		dockertest.WithoutReuse(),
+	)
 	if err != nil {
 		t.Fatalf("Could not start resource: %s", err)
 	}
-	defer func() {
-		if err := pool.Purge(resource); err != nil {
-			t.Fatalf("Could not purge resource: %s", err)
-		}
-	}()
-
 	urls := []string{fmt.Sprintf("http://127.0.0.1:%v", resource.GetPort("9200/tcp"))}
 
 	cfg := goEs.Config{
@@ -64,7 +59,7 @@ func TestIntegrationWriterV2(t *testing.T) {
 	client, err := goEs.NewClient(cfg)
 	require.NoError(t, err)
 
-	if err = pool.Retry(func() error {
+	if err = pool.Retry(t.Context(), 0, func() error {
 		res, err := client.Cluster.Health()
 		if err != nil {
 			return err

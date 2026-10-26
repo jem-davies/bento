@@ -12,10 +12,12 @@ import (
 
 	"cloud.google.com/go/spanner"
 	"github.com/Jeffail/shutdown"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+
 	types "github.com/warpstreamlabs/bento/internal/impl/gcp/types"
 	"github.com/warpstreamlabs/bento/public/service"
-	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc/codes"
 )
 
 // TODO(gregfurman): Implement caching and checkpointing mechanism
@@ -46,6 +48,7 @@ type cdcConfig struct {
 	StartTime            *time.Time
 	EndTime              *time.Time
 	HeartbeatInterval    time.Duration
+	ClientOptions        []option.ClientOption
 
 	prefetchCount int
 }
@@ -90,6 +93,10 @@ func cdcConfigFromParsed(pConf *service.ParsedConfig) (conf cdcConfig, err error
 	}
 
 	if conf.HeartbeatInterval, err = pConf.FieldDuration(cdcFieldHeartbeatInterval); err != nil {
+		return
+	}
+
+	if conf.ClientOptions, err = gcpClientOptionsFromParsed(pConf); err != nil {
 		return
 	}
 
@@ -145,6 +152,7 @@ This input adds the following metadata fields to each message:
 				Example(1024).
 				Default(1024).
 				LintRule(`root = if this < 0 { ["prefetch count must be greater than or equal to zero"] }`),
+			gcpCredentialsField(),
 		)
 }
 
@@ -184,7 +192,7 @@ type changeRecord struct {
 }
 
 func newGcpSpannerCDCInput(conf cdcConfig, res *service.Resources) (*gcpSpannerCDCInput, error) {
-	client, err := spanner.NewClient(context.Background(), conf.SpannerDSN)
+	client, err := spanner.NewClient(context.Background(), conf.SpannerDSN, conf.ClientOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +219,7 @@ func (c *gcpSpannerCDCInput) Connect(ctx context.Context) error {
 	}
 
 	if c.streamClient == nil {
-		client, err := spanner.NewClient(ctx, c.conf.SpannerDSN)
+		client, err := spanner.NewClient(ctx, c.conf.SpannerDSN, c.conf.ClientOptions...)
 		if err != nil {
 			return err
 		}

@@ -14,9 +14,9 @@ jobs:
       uses: actions/checkout@v7
 
     - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@v1.3.1
+      uses: jlumbroso/free-disk-space@v2.0.0
       with:
-        tool-cache: false
+        preinstalled-runtimes: false
         android: true
         dotnet: true
         haskell: true
@@ -34,7 +34,7 @@ jobs:
         sudo swapon --show
 
     - name: Install Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@v7
       with:
         go-version-file: go.mod
         check-latest: true
@@ -61,9 +61,9 @@ jobs:
       uses: actions/checkout@v7
 
     - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@v1.3.1
+      uses: jlumbroso/free-disk-space@v2.0.0
       with:
-        tool-cache: false
+        preinstalled-runtimes: false
         android: true
         dotnet: true
         haskell: true

@@ -182,18 +182,12 @@ func (f *fsEventWatcher) Connect(ctx context.Context) error {
 					st, err := os.Stat(event.Name)
 					if err != nil {
 						f.log.Warnf("Cannot check for new subpath: %s", err)
-						continue
-					}
-
-					// if it is a file dont add it.
-					if !st.IsDir() {
-						continue
-					}
-
-					// adding the same path more than once is a noop,
-					// so safe even though it is already in the watchlist
-					if err := f.watcher.Add(event.Name); err != nil {
-						f.log.Warnf("Failed to add path %v: %s", event.Name, err)
+					} else if st.IsDir() {
+						// adding the same path more than once is a noop,
+						// so safe even though it is already in the watchlist
+						if err := f.watcher.Add(event.Name); err != nil {
+							f.log.Warnf("Failed to add path %v: %s", event.Name, err)
+						}
 					}
 				}
 
@@ -211,7 +205,15 @@ func (f *fsEventWatcher) Connect(ctx context.Context) error {
 				if !ok {
 					return
 				}
-				f.log.Errorf("error: %v", err)
+				// A watcher error (for example a watched path backed by an SMB
+				// share reporting "The specified network name is no longer
+				// available" once the session is torn down) leaves the
+				// underlying fsnotify watch dead with no way to recover it in
+				// place. Stop the read loop so that Read surfaces a disconnect
+				// and the framework rebuilds the watcher via Connect, instead of
+				// silently blocking until the process is restarted.
+				f.log.Errorf("filesystem watcher error, reconnecting: %v", err)
+				return
 			}
 		}
 	}()
@@ -236,8 +238,11 @@ func (f *fsEventWatcher) Read(ctx context.Context) (*service.Message, service.Ac
 			f.cMut.Lock()
 			defer f.cMut.Unlock()
 			f.eventChan = nil
-			f.watcher = nil
-			return nil, nil, service.ErrEndOfInput
+			if f.watcher != nil {
+				_ = f.watcher.Close()
+				f.watcher = nil
+			}
+			return nil, nil, service.ErrNotConnected
 		}
 
 		message := service.NewMessage(nil)

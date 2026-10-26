@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -137,6 +138,13 @@ Finally, it's also possible to specify an explicit offset to consume from by add
 			Version("1.3.0").
 			Default("5s").
 			Advanced()).
+		Field(service.NewStringField("broker_read_max_bytes").
+			Description("broker_read_max_bytes sets the maximum response size that can be read from Kafka.").
+			Advanced().
+			Version("1.21.0").
+			Default("100MiB").
+			Example("100MB").
+			Example("50mib")).
 		Field(service.NewIntField("preferring_lag").
 			Description(`
 This allows you to re-order partitions before they are fetched, given each partition's current lag.
@@ -147,6 +155,14 @@ With this option, you can return topic order and per-topic partition ordering. T
 			Version("1.3.0").
 			Optional().
 			Advanced()).
+		Field(service.NewStringAnnotatedEnumField("transaction_isolation_level", map[string]string{
+			"read_uncommitted": "Consume all records, including records from aborted or open transactions.",
+			"read_committed":   "Consume only non-transactional records and records from committed transactions.",
+		}).
+			Description("Controls the isolation level used for Kafka fetch requests.").
+			Default("read_uncommitted").
+			Advanced().
+			Version("1.21.0")).
 		Field(service.NewTLSToggledField("tls")).
 		Field(saslField()).
 		Field(service.NewBoolField("multi_header").Description("Decode headers into lists to allow handling of multiple values with the same key").Default(false).Advanced()).
@@ -207,6 +223,7 @@ type franzKafkaReader struct {
 	saslConfs       []sasl.Mechanism
 	checkpointLimit int
 	autoOffsetReset string
+	isolationLevel  kgo.IsolationLevel
 	commitPeriod    time.Duration
 	regexPattern    bool
 	multiHeader     bool
@@ -217,6 +234,7 @@ type franzKafkaReader struct {
 	metadataMaxAge         time.Duration
 	fetchMaxBytes          int32
 	fetchMaxPartitionBytes int32
+	brokerReadMaxBytes     int32
 	fetchMaxWait           time.Duration
 	preferringLagFn        kgo.PreferLagFn
 	balancers              []kgo.GroupBalancer
@@ -361,6 +379,14 @@ func newFranzKafkaReaderFromConfig(conf *service.ParsedConfig, res *service.Reso
 		return nil, err
 	}
 
+	var isolationLevel string
+	if isolationLevel, err = conf.FieldString("transaction_isolation_level"); err != nil {
+		return nil, err
+	}
+	if isolationLevel == "read_committed" {
+		f.isolationLevel = kgo.ReadCommitted()
+	}
+
 	if f.reconnectOnUnknownTopic, err = conf.FieldBool("reconnect_on_unknown_topic_or_partition"); err != nil {
 		return nil, err
 	}
@@ -386,6 +412,9 @@ func newFranzKafkaReaderFromConfig(conf *service.ParsedConfig, res *service.Reso
 	if err != nil {
 		return nil, err
 	}
+	if fetchMaxBytes > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("invalid fetch_max_bytes, must not exceed %v", math.MaxInt32)
+	}
 	f.fetchMaxBytes = int32(fetchMaxBytes)
 
 	fetchMaxPartitionBytesStr, err := conf.FieldString("fetch_max_partition_bytes")
@@ -397,11 +426,28 @@ func newFranzKafkaReaderFromConfig(conf *service.ParsedConfig, res *service.Reso
 	if err != nil {
 		return nil, err
 	}
+	if fetchMaxPartitionBytes > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("invalid fetch_max_partition_bytes, must not exceed %v", math.MaxInt32)
+	}
 	f.fetchMaxPartitionBytes = int32(fetchMaxPartitionBytes)
 
 	if f.fetchMaxWait, err = conf.FieldDuration("fetch_max_wait"); err != nil {
 		return nil, err
 	}
+
+	brokerReadMaxBytesStr, err := conf.FieldString("broker_read_max_bytes")
+	if err != nil {
+		return nil, err
+	}
+
+	brokerReadMaxBytes, err := humanize.ParseBytes(brokerReadMaxBytesStr)
+	if err != nil {
+		return nil, err
+	}
+	if brokerReadMaxBytes > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("invalid broker_read_max_bytes, must not exceed %v", math.MaxInt32)
+	}
+	f.brokerReadMaxBytes = int32(brokerReadMaxBytes)
 
 	if conf.Contains("preferring_lag") {
 		if preferringLag, err := conf.FieldInt("preferring_lag"); err != nil {
@@ -471,7 +517,9 @@ type msgWithRecord struct {
 
 func (f *franzKafkaReader) recordToMessage(record *kgo.Record) *msgWithRecord {
 	msg := service.NewMessage(record.Value)
-	msg.MetaSetMut("kafka_key", string(record.Key))
+	if record.Key != nil {
+		msg.MetaSetMut("kafka_key", string(record.Key))
+	}
 	msg.MetaSetMut("kafka_topic", record.Topic)
 	msg.MetaSetMut("kafka_partition", int(record.Partition))
 	msg.MetaSetMut("kafka_offset", int(record.Offset))
@@ -851,6 +899,7 @@ func (f *franzKafkaReader) Connect(ctx context.Context) error {
 		kgo.ConsumeTopics(f.topics...),
 		kgo.ConsumePartitions(f.topicPartitions),
 		kgo.ConsumeResetOffset(initialOffset),
+		kgo.FetchIsolationLevel(f.isolationLevel),
 		kgo.SASL(f.saslConfs...),
 		kgo.ConsumerGroup(f.consumerGroup),
 		kgo.ClientID(f.clientID),
@@ -859,6 +908,7 @@ func (f *franzKafkaReader) Connect(ctx context.Context) error {
 		kgo.MetadataMaxAge(f.metadataMaxAge),
 		kgo.FetchMaxBytes(f.fetchMaxBytes),
 		kgo.FetchMaxPartitionBytes(f.fetchMaxPartitionBytes),
+		kgo.BrokerMaxReadBytes(f.brokerReadMaxBytes),
 		kgo.FetchMaxWait(f.fetchMaxWait),
 		kgo.ConsumePreferringLagFn(f.preferringLagFn),
 		kgo.Balancers(f.balancers...),

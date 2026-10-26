@@ -6,6 +6,9 @@ import (
 	"sync"
 
 	"cloud.google.com/go/bigtable"
+	"google.golang.org/api/option"
+
+	"github.com/warpstreamlabs/bento/public/bloblang"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
@@ -16,6 +19,7 @@ const (
 	btoFieldColumn      = "column"
 	btoFieldRowKey      = "row_key"
 	btoFieldFamily      = "family"
+	btoFieldTimestamp   = "timestamp"
 	btoFieldBatching    = "batching"
 	btoFieldMaxInFlight = "max_in_flight"
 )
@@ -85,8 +89,15 @@ This output benefits from sending messages as a batch for improved performance. 
 				Description("The column family to write into.").
 				Example("cf1").
 				Example(`${!metadata("family")}`),
+			service.NewBloblangField(btoFieldTimestamp).
+				Description("Expression for the timestamp of the record. Expects either a UNIX timestamp in seconds (fractional values for sub-second precision), or a string value as `RFC3339Nano`. Timestamps are truncated to millisecond granularity. Otherwise, defaults to the local current time.").
+				Optional().
+				Example(`metadata("timestamp")`).
+				Example(`json("event_ts_ms").number() / 1000`).
+				Example(`json("created_at").ts_parse("2006-01-02 15:04:05")`),
 			service.NewBatchPolicyField(btoFieldBatching),
 			service.NewOutputMaxInFlightField(),
+			gcpCredentialsField(),
 		)
 }
 
@@ -99,6 +110,10 @@ type gcpBigTableOutputConfig struct {
 	RowKey       *service.InterpolatedString
 	ColumnName   *service.InterpolatedString
 	ColumnFamily *service.InterpolatedString
+
+	Timestamp *bloblang.Executor
+
+	ClientOptions []option.ClientOption
 }
 
 func gcpBigTableOutputConfigFromParsed(conf *service.ParsedConfig) (gconf gcpBigTableOutputConfig, err error) {
@@ -123,6 +138,16 @@ func gcpBigTableOutputConfigFromParsed(conf *service.ParsedConfig) (gconf gcpBig
 	}
 
 	if gconf.ColumnFamily, err = conf.FieldInterpolatedString(btoFieldFamily); err != nil {
+		return
+	}
+
+	if conf.Contains(btoFieldTimestamp) {
+		if gconf.Timestamp, err = conf.FieldBloblang(btoFieldTimestamp); err != nil {
+			return
+		}
+	}
+
+	if gconf.ClientOptions, err = gcpClientOptionsFromParsed(conf); err != nil {
 		return
 	}
 
@@ -152,7 +177,7 @@ func (g *gcpBigTableOutput) Connect(ctx context.Context) error {
 	defer g.mu.Unlock()
 
 	if g.client == nil {
-		client, err := bigtable.NewClient(ctx, g.conf.ProjectID, g.conf.InstanceID)
+		client, err := bigtable.NewClient(ctx, g.conf.ProjectID, g.conf.InstanceID, g.conf.ClientOptions...)
 		if err != nil {
 			return fmt.Errorf("could not create bigtable client: %w", err)
 		}
@@ -181,6 +206,11 @@ func (g *gcpBigTableOutput) WriteBatch(ctx context.Context, batch service.Messag
 	familyExec := batch.InterpolationExecutor(g.conf.ColumnFamily)
 	columnExec := batch.InterpolationExecutor(g.conf.ColumnName)
 	rowKeyExec := batch.InterpolationExecutor(g.conf.RowKey)
+
+	var timestampExec *service.MessageBatchBloblangExecutor
+	if g.conf.Timestamp != nil {
+		timestampExec = batch.BloblangExecutor(g.conf.Timestamp)
+	}
 
 	tbl := g.client.Open(tableName)
 	g.mu.RUnlock()
@@ -211,8 +241,22 @@ func (g *gcpBigTableOutput) WriteBatch(ctx context.Context, batch service.Messag
 			return err
 		}
 
+		ts := bigtable.Now()
+		if timestampExec != nil {
+			val, err := timestampExec.QueryValue(i)
+			if err != nil {
+				return err
+			}
+
+			t, err := bloblang.ValueAsTimestamp(val)
+			if err != nil {
+				return err
+			}
+			ts = bigtable.Time(t)
+		}
+
 		rowKeys[i] = rowKey
-		mut.Set(family, col, bigtable.Now(), contents)
+		mut.Set(family, col, ts.TruncateToMilliseconds(), contents)
 		muts[i] = mut
 	}
 

@@ -33,6 +33,8 @@ cache_resources:
 		integration.CacheTestDoubleAdd(),
 		integration.CacheTestDelete(),
 		integration.CacheTestGetAndSet(50),
+		integration.CacheTestMissingKeyExists(),
+		integration.CacheTestExistsAndSet(50),
 	)
 	suite.Run(
 		t, template,
@@ -75,11 +77,9 @@ func createBucket(ctx context.Context, port, bucket string) error {
 	}
 
 	err = cluster.Buckets().CreateBucket(gocb.CreateBucketSettings{
-		BucketSettings: gocb.BucketSettings{
-			Name:       bucket,
-			RAMQuotaMB: 100, // smallest value and allow max 10 running bucket with cluster-ramsize 1024 from setup script
-			BucketType: gocb.CouchbaseBucketType,
-		},
+		Name:       bucket,
+		RAMQuotaMB: 100, // smallest value and allow max 10 running bucket with cluster-ramsize 1024 from setup script
+		BucketType: gocb.CouchbaseBucketType,
 	}, nil)
 	if err != nil {
 		return err
